@@ -95,7 +95,7 @@ weight_all_verts(cone, "Root", 1.0)
 
 # ============================================================
 # CREATE FINS (distributed around rocket)
-# Each fin is fully weighted to Fin_i
+# Each fin is fully weighted to its corresponding fin bone vertex group.
 # ============================================================
 fins = []
 for i in range(fin_count):
@@ -118,7 +118,8 @@ for i in range(fin_count):
     fin.rotation_euler = (0.0, 0.0, angle)
     bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
 
-    weight_all_verts(fin, f"Fin_{i}", 1.0)
+    # Match the bone name we create below (so skinning works in glTF).
+    weight_all_verts(fin, f"Root.Fin_{i}", 1.0)
     fins.append(fin)
 
 # ============================================================
@@ -159,7 +160,8 @@ for i in range(fin_count):
     outward = Vector((1.0, 0.0, 0.0))
     outward = Matrix.Rotation(angle, 4, "Z") @ outward
 
-    b = arm.edit_bones.new(f"Fin_{i}")
+    # Name bones to match the requested convention in-engine.
+    b = arm.edit_bones.new(f"Root.Fin_{i}")
     b.head = hinge
     b.tail = hinge + outward * (fin_length * 0.6)
     b.parent = root_bone

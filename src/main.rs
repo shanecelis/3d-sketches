@@ -3,12 +3,12 @@ use bevy::prelude::*;
 use bevy_editor_cam::prelude::*;
 
 const ROCKET_GLB: &str = "rocket.glb";
-const FIN_BONE_NAME: &str = "Root.Fin_0";
+const FIN_COUNT: usize = 4;
 
 #[derive(Resource, Default)]
-struct FinBone {
-    entity: Option<Entity>,
-    base_rotation: Option<Quat>,
+struct FinBones {
+    entities: [Option<Entity>; FIN_COUNT],
+    base_rotations: [Option<Quat>; FIN_COUNT],
 }
 
 fn main() {
@@ -23,9 +23,9 @@ fn main() {
             }),
         )
         .add_plugins(DefaultEditorCamPlugins)
-        .init_resource::<FinBone>()
+        .init_resource::<FinBones>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (find_fin_bone, animate_fin))
+        .add_systems(Update, (find_fin_bones, animate_fins))
         .run();
 }
 
@@ -53,34 +53,53 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((Name::new("Rocket"), SceneRoot(rocket_scene)));
 }
 
-fn find_fin_bone(
-    mut fin: ResMut<FinBone>,
+fn find_fin_bones(
+    mut fins: ResMut<FinBones>,
     named_transforms: Query<(Entity, &Name, &Transform)>,
 ) {
-    if fin.entity.is_some() {
+    if fins.entities.iter().all(|e| e.is_some()) {
         return;
     }
 
     for (entity, name, transform) in &named_transforms {
-        if name.as_str() == FIN_BONE_NAME {
-            fin.entity = Some(entity);
-            fin.base_rotation = Some(transform.rotation);
-            info_once!("Found fin bone: {FIN_BONE_NAME} ({entity:?})");
-            break;
+        let Some(i) = fin_index_from_name(name.as_str()) else {
+            continue;
+        };
+        if fins.entities[i].is_some() {
+            continue;
         }
+        fins.entities[i] = Some(entity);
+        fins.base_rotations[i] = Some(transform.rotation);
+        info_once!("Found fin bone: {} ({entity:?})", name.as_str());
     }
 }
 
-fn animate_fin(time: Res<Time>, fin: Res<FinBone>, mut transforms: Query<&mut Transform>) {
-    let (Some(entity), Some(base_rotation)) = (fin.entity, fin.base_rotation) else {
-        return;
-    };
+fn fin_index_from_name(name: &str) -> Option<usize> {
+    // Accept either "Fin_0" or "Root.Fin_0" (and other "<prefix>.Fin_0"-style names).
+    let (prefix, idx_str) = name.rsplit_once("Fin_")?;
+    if !(prefix.is_empty() || prefix.ends_with('.')) {
+        return None;
+    }
+    let idx: usize = idx_str.parse().ok()?;
+    if idx < FIN_COUNT { Some(idx) } else { None }
+}
 
-    let Ok(mut t) = transforms.get_mut(entity) else {
-        return;
-    };
-
+fn animate_fins(time: Res<Time>, fins: Res<FinBones>, mut transforms: Query<&mut Transform>) {
     // Simple "wave" motion. If the axis is wrong for your model, swap Z for X/Y.
-    let angle = 0.6 * time.elapsed_secs().sin();
-    t.rotation = base_rotation * Quat::from_rotation_z(angle);
+    let t = time.elapsed_secs();
+    let amplitude = 0.6;
+    let speed = 1.6;
+    let phase_step = std::f32::consts::TAU / FIN_COUNT as f32;
+
+    for i in 0..FIN_COUNT {
+        let (Some(entity), Some(base_rotation)) = (fins.entities[i], fins.base_rotations[i]) else {
+            continue;
+        };
+        let Ok(mut fin_transform) = transforms.get_mut(entity) else {
+            continue;
+        };
+
+        let angle = amplitude * (t * speed + i as f32 * phase_step).sin();
+        fin_transform.rotation = base_rotation * Quat::from_rotation_y(angle);
+    }
 }
