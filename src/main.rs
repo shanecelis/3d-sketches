@@ -1,7 +1,8 @@
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
+use bevy_editor_cam::prelude::*;
 
-const ROCKET_GLB: &str = "blender-rocket.glb";
+const ROCKET_GLB: &str = "rocket.glb";
 const FIN_BONE_NAME: &str = "Root.Fin_0";
 
 #[derive(Resource, Default)]
@@ -21,6 +22,7 @@ fn main() {
                 ..default()
             }),
         )
+        .add_plugins(DefaultEditorCamPlugins)
         .init_resource::<FinBone>()
         .add_systems(Startup, setup)
         .add_systems(Update, (find_fin_bone, animate_fin))
@@ -32,6 +34,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 1.5, 6.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        EditorCam::default(),
     ));
 
     // Light

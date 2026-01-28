@@ -1,22 +1,45 @@
 import bpy
 import math
+import sys
+from pathlib import Path
 from mathutils import Vector, Matrix
 
-# -----------------------------
-# Clean scene
-# -----------------------------
-bpy.ops.object.select_all(action='SELECT')
-bpy.ops.object.delete(use_global=False)
+# ============================================================
+# CLI ARG PARSING (Blender passes its own args; ours come after --)
+# Usage:
+#   blender --background --factory-startup --python make_rocket_glb.py -- /path/to/rocket.glb
+# ============================================================
+def get_cli_output_path(default_name="rocket.glb") -> str:
+    argv = sys.argv
+    if "--" in argv:
+        user_args = argv[argv.index("--") + 1 :]
+    else:
+        user_args = []
 
-if bpy.context.mode != 'OBJECT':
-    bpy.ops.object.mode_set(mode='OBJECT')
+    if len(user_args) >= 1 and user_args[0].strip():
+        return user_args[0]
+    return str(Path.cwd() / default_name)
+
+out_path = get_cli_output_path()
+out_path = str(Path(out_path).expanduser().resolve())
+
+# Ensure output directory exists
+Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
+# ============================================================
+# CLEAN SCENE
+# ============================================================
+bpy.ops.wm.read_factory_settings(use_empty=True)
+
+if bpy.context.mode != "OBJECT":
+    bpy.ops.object.mode_set(mode="OBJECT")
 
 scene = bpy.context.scene
-scene.unit_settings.system = 'METRIC'
+scene.unit_settings.system = "METRIC"
 
-# -----------------------------
-# Parameters
-# -----------------------------
+# ============================================================
+# PARAMETERS
+# ============================================================
 body_radius = 0.25
 body_height = 2.0
 
@@ -27,95 +50,80 @@ fin_height = 0.45
 fin_length = 0.60
 fin_thickness = 0.08
 
-fin_z = -body_height / 2 + fin_height / 2 + 0.05
 fin_count = 4
+fin_z = -body_height / 2 + fin_height / 2 + 0.05
 
-# Push fins outward so they don't get buried in the fuselage
+# Push fins outward so they are visible
 fin_radial_offset = body_radius + fin_thickness * 0.6 + 0.01
 
-
-# -----------------------------
-# Helpers
-# -----------------------------
-def ensure_object_mode():
-    if bpy.context.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-
+# ============================================================
+# HELPERS
+# ============================================================
 def weight_all_verts(obj, vg_name, weight=1.0):
     """Assign all vertices of obj to a vertex group."""
     vg = obj.vertex_groups.get(vg_name) or obj.vertex_groups.new(name=vg_name)
     idxs = [v.index for v in obj.data.vertices]
-    vg.add(idxs, weight, 'REPLACE')
+    vg.add(idxs, weight, "REPLACE")
     return vg
 
-
-# -----------------------------
-# Create rocket body (cylinder)
-# -----------------------------
+# ============================================================
+# CREATE BODY
+# ============================================================
 bpy.ops.mesh.primitive_cylinder_add(
     radius=body_radius,
     depth=body_height,
     vertices=48,
-    location=(0, 0, 0)
+    location=(0, 0, 0),
 )
 body = bpy.context.object
 body.name = "Body"
 weight_all_verts(body, "Root", 1.0)
 
-# -----------------------------
-# Create nose cone
-# -----------------------------
+# ============================================================
+# CREATE NOSE CONE
+# ============================================================
 bpy.ops.mesh.primitive_cone_add(
     radius1=cone_radius,
     radius2=0.0,
     depth=cone_height,
     vertices=48,
-    location=(0, 0, body_height / 2 + cone_height / 2)
+    location=(0, 0, body_height / 2 + cone_height / 2),
 )
 cone = bpy.context.object
 cone.name = "Nose"
 weight_all_verts(cone, "Root", 1.0)
 
-# -----------------------------
-# Create fins (distributed around rocket)
-# Each fin is a thin box, fully weighted to its own Fin_i vertex group.
-# -----------------------------
+# ============================================================
+# CREATE FINS (distributed around rocket)
+# Each fin is fully weighted to Fin_i
+# ============================================================
 fins = []
-
 for i in range(fin_count):
     angle = (2 * math.pi / fin_count) * i
 
-    # Create fin cube
     bpy.ops.mesh.primitive_cube_add(size=1.0)
     fin = bpy.context.object
     fin.name = f"FinObj_{i}"
 
-    # Scale into fin shape (X outward length, Y thickness, Z height)
+    # Scale fin: X thickness, Y outward length, Z height
     fin.scale = (fin_height / 2, fin_thickness / 2, fin_length / 2)
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
 
-    # Outward direction around Z axis
     outward_dir = Vector((math.cos(angle), math.sin(angle), 0.0))
 
-    # Place fin around the body near bottom
     fin.location = outward_dir * fin_radial_offset
     fin.location.z = fin_z
 
-    # Rotate fin so its "length" points outward
+    # Rotate so fin "points" outward
     fin.rotation_euler = (0.0, 0.0, angle)
     bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
 
-    # Weight to its bone group
-    vg_name = f"Fin_{i}"
-    weight_all_verts(fin, vg_name, 1.0)
-
+    weight_all_verts(fin, f"Fin_{i}", 1.0)
     fins.append(fin)
 
-# -----------------------------
-# Join into one mesh (preserve vertex groups)
-# -----------------------------
-ensure_object_mode()
+# ============================================================
+# JOIN INTO ONE MESH
+# ============================================================
 for obj in [body, cone] + fins:
     obj.select_set(True)
 bpy.context.view_layer.objects.active = body
@@ -125,9 +133,9 @@ rocket = bpy.context.object
 rocket.name = "Rocket"
 bpy.ops.object.shade_smooth()
 
-# -----------------------------
-# Create Armature / Rig
-# -----------------------------
+# ============================================================
+# CREATE ARMATURE / RIG
+# ============================================================
 bpy.ops.object.armature_add(enter_editmode=True, location=(0, 0, 0))
 rig = bpy.context.object
 rig.name = "RocketRig"
@@ -140,17 +148,16 @@ root_bone.name = "Root"
 root_bone.head = (0, 0, -body_height / 2)
 root_bone.tail = (0, 0, body_height / 2 + cone_height)
 
-# Fin bones: heads at hinge points on fuselage surface, tails pointing outward
+# Fin bones: hinge at (near) fin base, tail outward
 for i in range(fin_count):
     angle = (2 * math.pi / fin_count) * i
 
-    # Hinge point at body surface, aligned with fin position
+    # Put hinge near body surface; bias slightly inward along outward axis
     hinge = Vector((fin_radial_offset - fin_length * 0.25, 0.0, fin_z))
-    hinge = Matrix.Rotation(angle, 4, 'Z') @ hinge
+    hinge = Matrix.Rotation(angle, 4, "Z") @ hinge
 
-    # Outward direction for bone tail
     outward = Vector((1.0, 0.0, 0.0))
-    outward = Matrix.Rotation(angle, 4, 'Z') @ outward
+    outward = Matrix.Rotation(angle, 4, "Z") @ outward
 
     b = arm.edit_bones.new(f"Fin_{i}")
     b.head = hinge
@@ -158,25 +165,41 @@ for i in range(fin_count):
     b.parent = root_bone
     b.use_connect = False
 
-bpy.ops.object.mode_set(mode='OBJECT')
+bpy.ops.object.mode_set(mode="OBJECT")
 
-# -----------------------------
 # Bind mesh to armature (skinning)
-# -----------------------------
-mod = rocket.modifiers.new(name="Armature", type='ARMATURE')
+mod = rocket.modifiers.new(name="Armature", type="ARMATURE")
 mod.object = rig
 mod.use_vertex_groups = True
-
 rocket.parent = rig
 
-# Optional: don't force bones on top of mesh (set True if you want them visible)
-rig.show_in_front = False
-
-# Optional: make pose rotation easier to edit
+# Make rotation editing predictable (not required for export, but nice)
 bpy.context.view_layer.objects.active = rig
-bpy.ops.object.mode_set(mode='POSE')
+bpy.ops.object.mode_set(mode="POSE")
 for pb in rig.pose.bones:
-    pb.rotation_mode = 'XYZ'
-bpy.ops.object.mode_set(mode='OBJECT')
+    pb.rotation_mode = "XYZ"
+bpy.ops.object.mode_set(mode="OBJECT")
 
-print("Created Rocket + RocketRig. Animate by rotating Fin_0..Fin_3 bones in Pose Mode.")
+# ============================================================
+# EXPORT GLB
+# ============================================================
+# Select only our objects for export
+bpy.ops.object.select_all(action="DESELECT")
+rocket.select_set(True)
+rig.select_set(True)
+bpy.context.view_layer.objects.active = rocket
+
+# Export options:
+# - export_skins=True ensures the rig/weights go out
+# - export_animations=False (no clips created here; you can animate in your engine)
+bpy.ops.export_scene.gltf(
+    filepath=out_path,
+    export_format="GLB",
+    use_selection=True,
+    export_yup=True,
+    export_apply=False,
+    export_skins=True,
+    export_animations=False,
+)
+
+print(f"Exported: {out_path}")

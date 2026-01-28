@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.17.0"
+bevy_editor_cam = "0.7.0"
