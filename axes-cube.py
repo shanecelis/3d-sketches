@@ -201,7 +201,9 @@ for label, n in faces:
 
 
 # Border edges: 12 beams along cube edges, separated from corners.
-edge_len = max(0.01, cube_size - 2.0 * corner_size - 2.0 * gap)
+# edge_len = max(0.01, cube_size - 2.0 * corner_size - 2.0 * gap)
+# edge_len = max(0.01, cube_size - 2.0 * corner_size)
+edge_len = max(0.01, cube_size - 2.0 * corner_size)
 fixed = half - border_thickness / 2.0
 
 def add_edge(name: str, size_xyz: tuple[float, float, float], loc: Vector):
