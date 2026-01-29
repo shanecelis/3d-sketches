@@ -183,6 +183,49 @@ for pb in rig.pose.bones:
 bpy.ops.object.mode_set(mode="OBJECT")
 
 # ============================================================
+# BAKE A GLOBAL ROTATION (so engines don't need to rotate it)
+# Rotate the whole model +90° around Y and APPLY the transform.
+# ============================================================
+def bake_global_y_rotation(mesh_obj, armature_obj, angle_degrees: float):
+    """
+    Bake a world-space rotation into both the mesh object data and the armature,
+    while preserving skinning/parenting.
+    """
+    angle = math.radians(angle_degrees)
+    rot = Matrix.Rotation(angle, 4, "Y")
+
+    # Ensure we're in OBJECT mode.
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    # Temporarily unparent the mesh so applying transforms on the armature doesn't
+    # implicitly compensate the child and cancel out the intended bake.
+    bpy.ops.object.select_all(action="DESELECT")
+    mesh_obj.select_set(True)
+    bpy.context.view_layer.objects.active = mesh_obj
+    if mesh_obj.parent is not None:
+        bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
+
+    # Rotate both objects in world space.
+    mesh_obj.matrix_world = rot @ mesh_obj.matrix_world
+    armature_obj.matrix_world = rot @ armature_obj.matrix_world
+
+    # Apply rotation to bake into data.
+    for obj in (mesh_obj, armature_obj):
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+
+    # Re-parent mesh back to armature, preserving world transform.
+    mesh_obj.parent = armature_obj
+    mesh_obj.matrix_parent_inverse = armature_obj.matrix_world.inverted()
+
+
+# Rotate the exported rocket so it faces the desired direction in-engine.
+bake_global_y_rotation(rocket, rig, -90.0)
+
+# ============================================================
 # EXPORT GLB
 # ============================================================
 # Select only our objects for export

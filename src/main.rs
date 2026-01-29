@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use bevy_editor_cam::prelude::*;
 
 const ROCKET_GLB: &str = "rocket.glb";
+// const ROCKET_GLB: &str = "elodin-rocket.glb";
 const FIN_COUNT: usize = 4;
 
 #[derive(Resource, Default)]
