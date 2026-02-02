@@ -1,4 +1,5 @@
 import bpy
+import bmesh
 import math
 import sys
 from pathlib import Path
@@ -66,6 +67,69 @@ def weight_all_verts(obj, vg_name, weight=1.0):
     vg.add(idxs, weight, "REPLACE")
     return vg
 
+
+def make_mat(name: str, rgba):
+    """Create or fetch a Principled BSDF material with the given base color."""
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=name)
+        mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    if bsdf:
+        bsdf.inputs["Base Color"].default_value = rgba
+        bsdf.inputs["Roughness"].default_value = 0.65
+        bsdf.inputs["Metallic"].default_value = 0.0
+    return mat
+
+
+def assign_material(obj, mat):
+    obj.data.materials.clear()
+    obj.data.materials.append(mat)
+
+
+def assign_fin_two_sided_materials(fin_obj, local_axis: Vector, mat_a, mat_b, mat_edge):
+    """
+    Assign different materials to the two "broad" fin side faces.
+    We detect those faces by checking if the face normal is aligned with ±local_axis.
+
+    Important: This should be called while the fin's mesh is still in its local orientation
+    (i.e. before applying any object rotation), so the axis is unambiguous.
+    """
+    axis = local_axis.normalized()
+
+    fin_obj.data.materials.clear()
+    fin_obj.data.materials.append(mat_a)  # slot 0
+    fin_obj.data.materials.append(mat_b)  # slot 1
+    fin_obj.data.materials.append(mat_edge)  # slot 2
+
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    bm = bmesh.new()
+    bm.from_mesh(fin_obj.data)
+    bm.faces.ensure_lookup_table()
+
+    # Only treat faces with normals ~parallel to axis as "sides".
+    # Everything else gets the edge material.
+    align_threshold = 0.92
+    for f in bm.faces:
+        d = f.normal.dot(axis)
+        if abs(d) >= align_threshold:
+            f.material_index = 0 if d > 0.0 else 1
+        else:
+            f.material_index = 2
+
+    bm.to_mesh(fin_obj.data)
+    bm.free()
+
+# ============================================================
+# MATERIALS
+# ============================================================
+mat_body = make_mat("Mat_Body", (0.75, 0.75, 0.78, 1.0))
+mat_fin_outer = make_mat("Mat_Fin_Outer", (1.00, 0.35, 0.35, 1.0))
+mat_fin_inner = make_mat("Mat_Fin_Inner", (0.30, 0.70, 1.00, 1.0))
+mat_fin_edge = make_mat("Mat_Fin_Edge", (0.18, 0.18, 0.20, 1.0))
+
 # ============================================================
 # CREATE BODY
 # ============================================================
@@ -78,6 +142,7 @@ bpy.ops.mesh.primitive_cylinder_add(
 body = bpy.context.object
 body.name = "Body"
 weight_all_verts(body, "Root", 1.0)
+assign_material(body, mat_body)
 
 # ============================================================
 # CREATE NOSE CONE
@@ -92,6 +157,7 @@ bpy.ops.mesh.primitive_cone_add(
 cone = bpy.context.object
 cone.name = "Nose"
 weight_all_verts(cone, "Root", 1.0)
+assign_material(cone, mat_body)
 
 # ============================================================
 # CREATE FINS (distributed around rocket)
@@ -105,11 +171,22 @@ for i in range(fin_count):
     fin = bpy.context.object
     fin.name = f"FinObj_{i}"
 
-    # Scale fin: X thickness, Y outward length, Z height
+    # Scale fin: X height, Y thickness, Z outward length
     fin.scale = (fin_height / 2, fin_thickness / 2, fin_length / 2)
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
 
     outward_dir = Vector((math.cos(angle), math.sin(angle), 0.0))
+
+    # Two-sided fin materials (side A vs side B).
+    # Our fin thickness is along local +Y/-Y (because scale.y is fin_thickness).
+    # Assign materials *before* rotating the object, so local axes match bmesh normals.
+    assign_fin_two_sided_materials(
+        fin,
+        Vector((0.0, 1.0, 0.0)),
+        mat_fin_outer,
+        mat_fin_inner,
+        mat_fin_edge,
+    )
 
     fin.location = outward_dir * fin_radial_offset
     fin.location.z = fin_z
