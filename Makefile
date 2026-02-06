@@ -1,6 +1,6 @@
 BLENDER ?= /Applications/Blender.app/Contents/MacOS/Blender
 
-all: assets/blender-rocket.glb assets/axes-cube.glb
+all: assets/blender-rocket.glb assets/axes-cube.glb assets/assemble-rocket.glb
 
 # Build any `assets/<name>.glb` by running `<name>.py` and passing the output path after `--`.
 assets/%.glb: %.py | assets

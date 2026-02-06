@@ -1,0 +1,529 @@
+import bpy
+import bmesh
+import math
+import sys
+from pathlib import Path
+from mathutils import Vector, Matrix
+
+# ============================================================
+# CLI ARG PARSING (Blender passes its own args; ours come after --)
+# Usage:
+#   blender --background --factory-startup --python make_rocket_glb.py -- /path/to/rocket.glb
+# ============================================================
+def get_cli_output_path(default_name="rocket.glb") -> str:
+    argv = sys.argv
+    if "--" in argv:
+        user_args = argv[argv.index("--") + 1 :]
+    else:
+        user_args = []
+
+    if len(user_args) >= 1 and user_args[0].strip():
+        return user_args[0]
+    return str(Path.cwd() / default_name)
+
+out_path = get_cli_output_path()
+out_path = str(Path(out_path).expanduser().resolve())
+
+# Ensure output directory exists
+Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
+# Optional CLI overrides after output path:
+#   blender ... --python assemble-rocket.py -- out.glb Body.glb Fin.glb
+argv = sys.argv
+if "--" in argv:
+    user_args = argv[argv.index("--") + 1 :]
+else:
+    user_args = []
+
+script_dir = Path(__file__).resolve().parent
+body_glb_path = Path(user_args[1]).expanduser().resolve() if len(user_args) >= 2 else (script_dir / "Body.glb")
+fin_glb_path = Path(user_args[2]).expanduser().resolve() if len(user_args) >= 3 else (script_dir / "Fin.glb")
+
+# ============================================================
+# CLEAN SCENE
+# ============================================================
+bpy.ops.wm.read_factory_settings(use_empty=True)
+
+if bpy.context.mode != "OBJECT":
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+scene = bpy.context.scene
+scene.unit_settings.system = "METRIC"
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+fin_count = 4
+
+# Body import fixup (degrees). This rotation is baked into the final exported mesh.
+body_y_rotation_degrees = 0.0
+
+# Fins: if your `Fin.glb` is already positioned correctly relative to the rocket origin,
+# we can just duplicate it and spin copies around the rocket axis.
+rocket_axis = "X"  # "X" | "Y" | "Z" (axis that goes through the rocket body)
+place_fins_from_template = True
+fin_spin_axis = "X"  # axis to rotate copies around (usually same as rocket_axis)
+
+# Where along the fin height the bone pivot (hinge) should be.
+# 0.0 = bottom of fin, 1.0 = top of fin.
+fin_anchor_t = 0.65
+
+# (Only used when place_fins_from_template=False)
+# Where along the rocket height to place the fins, as an absolute offset above the body's bottom.
+# 2 inches = 0.0508 meters.
+INCH_TO_M = 0.0254
+fin_axis_offset_m = 2.0 * INCH_TO_M
+
+# ============================================================
+# HELPERS
+# ============================================================
+def weight_all_verts(obj, vg_name, weight=1.0):
+    """Assign all vertices of obj to a vertex group."""
+    vg = obj.vertex_groups.get(vg_name) or obj.vertex_groups.new(name=vg_name)
+    idxs = [v.index for v in obj.data.vertices]
+    vg.add(idxs, weight, "REPLACE")
+    return vg
+
+
+def make_mat(name: str, rgba):
+    """Create or fetch a Principled BSDF material with the given base color."""
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=name)
+        mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    if bsdf:
+        bsdf.inputs["Base Color"].default_value = rgba
+        bsdf.inputs["Roughness"].default_value = 0.65
+        bsdf.inputs["Metallic"].default_value = 0.0
+    return mat
+
+
+def assign_material(obj, mat):
+    obj.data.materials.clear()
+    obj.data.materials.append(mat)
+
+
+def assign_fin_two_sided_materials(fin_obj, local_axis: Vector, mat_a, mat_b, mat_edge):
+    """
+    Assign different materials to the two "broad" fin side faces.
+    We detect those faces by checking if the face normal is aligned with ±local_axis.
+
+    Important: This should be called while the fin's mesh is still in its local orientation
+    (i.e. before applying any object rotation), so the axis is unambiguous.
+    """
+    axis = local_axis.normalized()
+
+    fin_obj.data.materials.clear()
+    fin_obj.data.materials.append(mat_a)  # slot 0
+    fin_obj.data.materials.append(mat_b)  # slot 1
+    fin_obj.data.materials.append(mat_edge)  # slot 2
+
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    bm = bmesh.new()
+    bm.from_mesh(fin_obj.data)
+    bm.faces.ensure_lookup_table()
+
+    # Only treat faces with normals ~parallel to axis as "sides".
+    # Everything else gets the edge material.
+    align_threshold = 0.92
+    for f in bm.faces:
+        d = f.normal.dot(axis)
+        if abs(d) >= align_threshold:
+            f.material_index = 0 if d > 0.0 else 1
+        else:
+            f.material_index = 2
+
+    bm.to_mesh(fin_obj.data)
+    bm.free()
+
+# ============================================================
+# IMPORT HELPERS
+# ============================================================
+def import_glb_mesh(filepath: Path, join_name: str):
+    """Import a GLB and return a single joined mesh object (parents cleared, transforms applied)."""
+    filepath = Path(filepath).expanduser().resolve()
+    if not filepath.exists():
+        raise RuntimeError(f"Missing GLB: {filepath}")
+
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=str(filepath))
+    imported = [o for o in bpy.data.objects if o not in before]
+    meshes = [o for o in imported if o.type == "MESH"]
+    if not meshes:
+        raise RuntimeError(f"No mesh objects found in: {filepath}")
+
+    # Clear parenting (keep world transforms), then bake transforms into mesh data.
+    for obj in meshes:
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        if obj.parent is not None:
+            bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+
+    # Join into one mesh object for simpler skinning/export.
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in meshes:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+    bpy.ops.object.join()
+    joined = bpy.context.object
+    joined.name = join_name
+    return joined
+
+
+def bake_object_rotation(obj, rotation_euler_xyz):
+    """Set an object's rotation_euler and bake it into the mesh data."""
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+
+    obj.rotation_euler = rotation_euler_xyz
+    bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+
+
+def local_aabb(obj):
+    """Return (min_vec, max_vec) of the object's local-space AABB (after transforms applied)."""
+    pts = [Vector(c) for c in obj.bound_box]
+    vmin = Vector((min(p.x for p in pts), min(p.y for p in pts), min(p.z for p in pts)))
+    vmax = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
+    return vmin, vmax
+
+
+def axis_index(axis: str) -> int:
+    axis = axis.upper()
+    if axis == "X":
+        return 0
+    if axis == "Y":
+        return 1
+    if axis == "Z":
+        return 2
+    raise ValueError(f"Invalid axis: {axis}")
+
+
+def radial_distance_from_axis(v: Vector, axis: str) -> float:
+    axis = axis.upper()
+    if axis == "X":
+        return math.sqrt(v.y * v.y + v.z * v.z)
+    if axis == "Y":
+        return math.sqrt(v.x * v.x + v.z * v.z)
+    if axis == "Z":
+        return math.sqrt(v.x * v.x + v.y * v.y)
+    raise ValueError(f"Invalid axis: {axis}")
+
+
+def estimate_hinge_point(mesh_obj, axis: str, t: float) -> Vector:
+    """
+    Estimate a good hinge point for the fin from its geometry:
+    - choose vertices near the requested axis position (based on t along the fin extent)
+    - then choose the ones closest to the rocket axis (minimum radial distance)
+    """
+    axis = axis.upper()
+    ai = axis_index(axis)
+
+    vmin, vmax = local_aabb(mesh_obj)
+    axis_min = vmin[ai]
+    axis_max = vmax[ai]
+    axis_len = max(1e-6, axis_max - axis_min)
+    target = axis_min + axis_len * float(t)
+    eps = axis_len * 0.08
+
+    verts = [v.co.copy() for v in mesh_obj.data.vertices]
+    candidates = [v for v in verts if abs(v[ai] - target) <= eps]
+    if not candidates:
+        candidates = verts
+
+    dists = [radial_distance_from_axis(v, axis) for v in candidates]
+    min_d = min(dists)
+    # take a small band near the minimum to stabilize average
+    band = min_d + max(1e-6, 0.02 * axis_len)
+    near = [v for v, d in zip(candidates, dists) if d <= band]
+    if not near:
+        near = candidates
+
+    acc = Vector((0.0, 0.0, 0.0))
+    for v in near:
+        acc += v
+    return acc / len(near)
+
+
+def outward_dir_from_hinge(hinge: Vector, axis: str) -> Vector:
+    axis = axis.upper()
+    if axis == "X":
+        v = Vector((0.0, hinge.y, hinge.z))
+    elif axis == "Y":
+        v = Vector((hinge.x, 0.0, hinge.z))
+    else:  # "Z"
+        v = Vector((hinge.x, hinge.y, 0.0))
+    if v.length < 1e-6:
+        return Vector((0.0, 1.0, 0.0))
+    return v.normalized()
+
+
+def axis_radial_max(mesh_obj, axis: str) -> float:
+    vals = [radial_distance_from_axis(v.co, axis) for v in mesh_obj.data.vertices]
+    return max(vals) if vals else 0.0
+
+# ============================================================
+# MATERIALS
+# ============================================================
+mat_body = make_mat("Mat_Body", (0.75, 0.75, 0.78, 1.0))
+# Fin edge material (shared across fins).
+mat_fin_edge = make_mat("Mat_Fin_Edge", (0.18, 0.18, 0.20, 1.0))
+
+# Per-fin side colors.
+# Customize these to whatever you want: 4 fins × (outer, inner).
+fin_outer_colors = [
+    (1.00, 0.35, 0.35, 1.0),  # Fin 0 outer
+    (1.00, 0.65, 0.20, 1.0),  # Fin 1 outer
+    (0.35, 1.00, 0.50, 1.0),  # Fin 2 outer
+    (0.85, 0.35, 1.00, 1.0),  # Fin 3 outer
+]
+
+fin_inner_colors = [
+    (0.30, 0.70, 1.00, 1.0),  # Fin 0 inner
+    (0.20, 0.95, 0.95, 1.0),  # Fin 1 inner
+    (0.25, 0.35, 1.00, 1.0),  # Fin 2 inner
+    (1.00, 0.35, 0.85, 1.0),  # Fin 3 inner
+]
+
+# ============================================================
+# LOAD BODY + FIN TEMPLATE
+# ============================================================
+body = import_glb_mesh(body_glb_path, "Body")
+fin_template = import_glb_mesh(fin_glb_path, "FinTemplate")
+
+# Rotate the body to the desired orientation and bake it in.
+bake_object_rotation(body, (0.0, math.radians(body_y_rotation_degrees), 0.0))
+
+# If you want to preserve imported body materials, comment out the next line.
+assign_material(body, mat_body)
+
+body_min, body_max = local_aabb(body)
+ai = axis_index(rocket_axis)
+body_axis_min = body_min[ai]
+body_axis_max = body_max[ai]
+
+fin_min, fin_max = local_aabb(fin_template)
+fin_axis_len = fin_max[ai] - fin_min[ai]
+
+# If the fin mesh lies on the chosen spin axis (radial distance ~ 0), rotating won't create
+# distinct fins. Print diagnostics and pick a better axis if needed.
+rad_x = axis_radial_max(fin_template, "X")
+rad_y = axis_radial_max(fin_template, "Y")
+rad_z = axis_radial_max(fin_template, "Z")
+print(f"[assemble-rocket] fin radial max: X={rad_x:.6f}, Y={rad_y:.6f}, Z={rad_z:.6f}")
+
+spin_axis = fin_spin_axis.upper()
+rad_by_axis = {"X": rad_x, "Y": rad_y, "Z": rad_z}
+best_axis = max(rad_by_axis.items(), key=lambda kv: kv[1])[0]
+if rad_by_axis.get(spin_axis, 0.0) < 1e-5 and best_axis != spin_axis:
+    print(
+        f"[assemble-rocket] WARNING: fin_spin_axis={spin_axis} has ~zero radial offset; "
+        f"rotating around it will stack fins. Falling back to {best_axis}."
+    )
+    spin_axis = best_axis
+
+# Precompute hinge base point + outward extent from the fin template geometry.
+hinge_base = estimate_hinge_point(fin_template, rocket_axis, fin_anchor_t)
+radials = [radial_distance_from_axis(v.co, rocket_axis) for v in fin_template.data.vertices]
+radial_span = max(radials) - min(radials) if radials else 0.25
+
+# ============================================================
+# CREATE FINS (distributed around rocket)
+# Each fin is fully weighted to its corresponding fin bone vertex group.
+#
+# Assumptions about `Fin.glb` orientation (recommended):
+# - local +X: outward direction
+# - local +Y: thickness
+# - local +Z: rocket axis / fin height
+# - origin: near the hinge/pivot (optional but helpful)
+# ============================================================
+fins = []
+for i in range(fin_count):
+    angle = (2 * math.pi / fin_count) * i
+    fin = fin_template.copy()
+    fin.data = fin_template.data.copy()
+    fin.name = f"FinObj_{i}"
+    bpy.context.scene.collection.objects.link(fin)
+
+    # Two-sided fin materials (side A vs side B).
+    # Our fin thickness is along local +Y/-Y.
+    # Ensure object transform is identity before assigning (it should be after import+apply).
+    mat_fin_outer = make_mat(f"Mat_Fin{i}_Outer", fin_outer_colors[i])
+    mat_fin_inner = make_mat(f"Mat_Fin{i}_Inner", fin_inner_colors[i])
+    assign_fin_two_sided_materials(
+        fin,
+        Vector((0.0, 1.0, 0.0)),
+        mat_fin_outer,
+        mat_fin_inner,
+        mat_fin_edge,
+    )
+
+    if place_fins_from_template:
+        # Fin.glb is already placed correctly; just duplicate and spin copies around the rocket axis
+        # *in world space* so any imported offset from the axis is preserved.
+        fin.matrix_world = Matrix.Rotation(angle, 4, spin_axis) @ fin_template.matrix_world
+
+        bpy.ops.object.select_all(action="DESELECT")
+        fin.select_set(True)
+        bpy.context.view_layer.objects.active = fin
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    else:
+        # Legacy placement mode (kept for reference / future use).
+        fin_axis = body_axis_min + fin_axis_offset_m
+        if rocket_axis.upper() == "X":
+            fin.location.x = fin_axis
+        elif rocket_axis.upper() == "Y":
+            fin.location.y = fin_axis
+        else:
+            fin.location.z = fin_axis
+
+        bpy.ops.object.select_all(action="DESELECT")
+        fin.select_set(True)
+        bpy.context.view_layer.objects.active = fin
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+
+    # Match the bone name we create below (so skinning works in glTF).
+    weight_all_verts(fin, f"Root.Fin_{i}", 1.0)
+    fins.append(fin)
+
+# ============================================================
+# JOIN INTO ONE MESH
+# ============================================================
+for obj in [body] + fins:
+    obj.select_set(True)
+bpy.context.view_layer.objects.active = body
+bpy.ops.object.join()
+
+rocket = bpy.context.object
+rocket.name = "Rocket"
+bpy.ops.object.shade_smooth()
+
+# ============================================================
+# CREATE ARMATURE / RIG
+# ============================================================
+bpy.ops.object.armature_add(enter_editmode=True, location=(0, 0, 0))
+rig = bpy.context.object
+rig.name = "RocketRig"
+arm = rig.data
+arm.name = "RocketRigData"
+
+# Root bone
+root_bone = arm.edit_bones[0]
+root_bone.name = "Root"
+if rocket_axis.upper() == "X":
+    root_bone.head = (body_axis_min, 0, 0)
+    root_bone.tail = (body_axis_max, 0, 0)
+elif rocket_axis.upper() == "Y":
+    root_bone.head = (0, body_axis_min, 0)
+    root_bone.tail = (0, body_axis_max, 0)
+else:
+    root_bone.head = (0, 0, body_axis_min)
+    root_bone.tail = (0, 0, body_axis_max)
+
+# Fin bones: hinge at (near) fin base, tail outward
+for i in range(fin_count):
+    angle = (2 * math.pi / fin_count) * i
+
+    # Fin.glb provides the base fin placement. We estimate the hinge from fin geometry,
+    # then rotate that hinge point around the rocket axis for each fin.
+    hinge = hinge_base.copy()
+    hinge = Matrix.Rotation(angle, 4, spin_axis) @ hinge
+
+    outward = outward_dir_from_hinge(hinge, rocket_axis)
+
+    # Name bones to match the requested convention in-engine.
+    b = arm.edit_bones.new(f"Root.Fin_{i}")
+    b.head = hinge
+    b.tail = hinge + outward * (radial_span * 0.6)
+    b.parent = root_bone
+    b.use_connect = False
+
+bpy.ops.object.mode_set(mode="OBJECT")
+
+# Bind mesh to armature (skinning)
+mod = rocket.modifiers.new(name="Armature", type="ARMATURE")
+mod.object = rig
+mod.use_vertex_groups = True
+rocket.parent = rig
+
+# Make rotation editing predictable (not required for export, but nice)
+bpy.context.view_layer.objects.active = rig
+bpy.ops.object.mode_set(mode="POSE")
+for pb in rig.pose.bones:
+    pb.rotation_mode = "XYZ"
+bpy.ops.object.mode_set(mode="OBJECT")
+
+# ============================================================
+# BAKE A GLOBAL ROTATION (so engines don't need to rotate it)
+# Rotate the whole model +90° around Y and APPLY the transform.
+# ============================================================
+def bake_global_y_rotation(mesh_obj, armature_obj, angle_degrees: float):
+    """
+    Bake a world-space rotation into both the mesh object data and the armature,
+    while preserving skinning/parenting.
+    """
+    angle = math.radians(angle_degrees)
+    rot = Matrix.Rotation(angle, 4, "Y")
+
+    # Ensure we're in OBJECT mode.
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    # Temporarily unparent the mesh so applying transforms on the armature doesn't
+    # implicitly compensate the child and cancel out the intended bake.
+    bpy.ops.object.select_all(action="DESELECT")
+    mesh_obj.select_set(True)
+    bpy.context.view_layer.objects.active = mesh_obj
+    if mesh_obj.parent is not None:
+        bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
+
+    # Rotate both objects in world space.
+    mesh_obj.matrix_world = rot @ mesh_obj.matrix_world
+    armature_obj.matrix_world = rot @ armature_obj.matrix_world
+
+    # Apply rotation to bake into data.
+    for obj in (mesh_obj, armature_obj):
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+
+    # Re-parent mesh back to armature, preserving world transform.
+    mesh_obj.parent = armature_obj
+    mesh_obj.matrix_parent_inverse = armature_obj.matrix_world.inverted()
+
+
+# Rotate the exported rocket so it faces the desired direction in-engine.
+bake_global_y_rotation(rocket, rig, 180.0)
+
+# ============================================================
+# EXPORT GLB
+# ============================================================
+# Select only our objects for export
+bpy.ops.object.select_all(action="DESELECT")
+rocket.select_set(True)
+rig.select_set(True)
+bpy.context.view_layer.objects.active = rocket
+
+# Export options:
+# - export_skins=True ensures the rig/weights go out
+# - export_animations=False (no clips created here; you can animate in your engine)
+bpy.ops.export_scene.gltf(
+    filepath=out_path,
+    export_format="GLB",
+    use_selection=True,
+    export_yup=True,
+    export_apply=False,
+    export_skins=True,
+    export_animations=False,
+)
+
+print(f"Exported: {out_path}")

@@ -57,6 +57,10 @@ fin_z = -body_height / 2 + fin_height / 2 + 0.05
 # Push fins outward so they are visible
 fin_radial_offset = body_radius + fin_thickness * 0.6 + 0.01
 
+# Where along the fin height the bone pivot (hinge) should be.
+# 0.0 = bottom of fin, 1.0 = top of fin.
+fin_anchor_t = 0.65
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -186,8 +190,11 @@ for i in range(fin_count):
     fin = bpy.context.object
     fin.name = f"FinObj_{i}"
 
-    # Scale fin: X height, Y thickness, Z outward length
-    fin.scale = (fin_height / 2, fin_thickness / 2, fin_length / 2)
+    # Scale fin (local axes):
+    # - X: outward length (radial)
+    # - Y: thickness (tangential)
+    # - Z: height (along rocket axis)
+    fin.scale = (fin_length / 2, fin_thickness / 2, fin_height / 2)
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
 
     outward_dir = Vector((math.cos(angle), math.sin(angle), 0.0))
@@ -248,7 +255,10 @@ for i in range(fin_count):
     angle = (2 * math.pi / fin_count) * i
 
     # Put hinge near body surface; bias slightly inward along outward axis
-    hinge = Vector((fin_radial_offset - fin_length * 0.25, 0.0, fin_z))
+    # Move the hinge up towards the top of the fin (along Z in our layout).
+    fin_bottom_z = fin_z - fin_height * 0.5
+    hinge_z = fin_bottom_z + fin_height * fin_anchor_t
+    hinge = Vector((fin_radial_offset - fin_length * 0.25, 0.0, hinge_z))
     hinge = Matrix.Rotation(angle, 4, "Z") @ hinge
 
     outward = Vector((1.0, 0.0, 0.0))
