@@ -126,9 +126,24 @@ def assign_fin_two_sided_materials(fin_obj, local_axis: Vector, mat_a, mat_b, ma
 # MATERIALS
 # ============================================================
 mat_body = make_mat("Mat_Body", (0.75, 0.75, 0.78, 1.0))
-mat_fin_outer = make_mat("Mat_Fin_Outer", (1.00, 0.35, 0.35, 1.0))
-mat_fin_inner = make_mat("Mat_Fin_Inner", (0.30, 0.70, 1.00, 1.0))
+# Fin edge material (shared across fins).
 mat_fin_edge = make_mat("Mat_Fin_Edge", (0.18, 0.18, 0.20, 1.0))
+
+# Per-fin side colors.
+# Customize these to whatever you want: 4 fins × (outer, inner).
+fin_outer_colors = [
+    (1.00, 0.35, 0.35, 1.0),  # Fin 0 outer
+    (1.00, 0.65, 0.20, 1.0),  # Fin 1 outer
+    (0.35, 1.00, 0.50, 1.0),  # Fin 2 outer
+    (0.85, 0.35, 1.00, 1.0),  # Fin 3 outer
+]
+
+fin_inner_colors = [
+    (0.30, 0.70, 1.00, 1.0),  # Fin 0 inner
+    (0.20, 0.95, 0.95, 1.0),  # Fin 1 inner
+    (0.25, 0.35, 1.00, 1.0),  # Fin 2 inner
+    (1.00, 0.35, 0.85, 1.0),  # Fin 3 inner
+]
 
 # ============================================================
 # CREATE BODY
@@ -180,6 +195,8 @@ for i in range(fin_count):
     # Two-sided fin materials (side A vs side B).
     # Our fin thickness is along local +Y/-Y (because scale.y is fin_thickness).
     # Assign materials *before* rotating the object, so local axes match bmesh normals.
+    mat_fin_outer = make_mat(f"Mat_Fin{i}_Outer", fin_outer_colors[i])
+    mat_fin_inner = make_mat(f"Mat_Fin{i}_Inner", fin_inner_colors[i])
     assign_fin_two_sided_materials(
         fin,
         Vector((0.0, 1.0, 0.0)),

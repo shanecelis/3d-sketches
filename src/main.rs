@@ -2,7 +2,7 @@ use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use bevy_editor_cam::prelude::*;
 
-const ROCKET_GLB: &str = "rocket.glb";
+const ROCKET_GLB: &str = "blender-rocket.glb";
 // const ROCKET_GLB: &str = "elodin-rocket.glb";
 const FIN_COUNT: usize = 4;
 
@@ -88,7 +88,7 @@ fn fin_index_from_name(name: &str) -> Option<usize> {
 fn animate_fins(time: Res<Time>, fins: Res<FinBones>, mut transforms: Query<&mut Transform>) {
     // Simple "wave" motion. If the axis is wrong for your model, swap Z for X/Y.
     let t = time.elapsed_secs();
-    let amplitude = 0.6;
+    let amplitude = 1.6;
     let speed = 1.6;
     let phase_step = std::f32::consts::TAU / FIN_COUNT as f32;
 
