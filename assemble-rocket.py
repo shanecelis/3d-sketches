@@ -99,6 +99,63 @@ def make_mat(name: str, rgba):
     return mat
 
 
+
+def make_vertex_color_mat(name: str, layer_name: str):
+    """
+    Material that displays vertex colors (by name) as Base Color.
+    Useful so importing the exported GLB back into Blender immediately shows the paint.
+    """
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+
+    nt = mat.node_tree
+    nt.nodes.clear()
+
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    out.location = (300, 0)
+    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+    bsdf.location = (80, 0)
+    attr = nt.nodes.new("ShaderNodeAttribute")
+    attr.location = (-160, 0)
+    attr.attribute_name = layer_name
+
+    nt.links.new(attr.outputs["Color"], bsdf.inputs["Base Color"])
+    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    return mat
+
+
+def make_image_texture_mat(name: str, image: bpy.types.Image, uv_layer_name: str):
+    """Material that displays an Image Texture using the given UV map (reliable Blender preview)."""
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+
+    nt = mat.node_tree
+    nt.nodes.clear()
+
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    out.location = (420, 0)
+    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+    bsdf.location = (200, 0)
+    tex = nt.nodes.new("ShaderNodeTexImage")
+    tex.location = (-60, 0)
+    tex.image = image
+    tex.interpolation = "Closest"
+    tex.extension = "CLIP"
+
+    uv = nt.nodes.new("ShaderNodeUVMap")
+    uv.location = (-260, -40)
+    uv.uv_map = uv_layer_name
+
+    nt.links.new(uv.outputs["UV"], tex.inputs["Vector"])
+    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    return mat
+
+
 def assign_material(obj, mat):
     obj.data.materials.clear()
     obj.data.materials.append(mat)
@@ -270,6 +327,53 @@ def axis_radial_max(mesh_obj, axis: str) -> float:
     vals = [radial_distance_from_axis(v.co, axis) for v in mesh_obj.data.vertices]
     return max(vals) if vals else 0.0
 
+
+def ensure_uv_layer(mesh: bpy.types.Mesh, uv_name: str):
+    """Ensure a UV map exists (Blender join/export tends to keep only active object's UV maps)."""
+    uv = mesh.uv_layers.get(uv_name)
+    if uv is None:
+        uv = mesh.uv_layers.new(name=uv_name)
+    mesh.uv_layers.active = uv
+    mesh.uv_layers.active_index = mesh.uv_layers.find(uv.name)
+    return uv
+
+
+def detect_fin_side_axis(mesh_obj, align_threshold: float = 0.80) -> Vector:
+    """
+    Pick which local axis (X/Y/Z) best matches the fin's broad side face normals.
+    Returns a unit Vector in local space.
+    """
+    mesh = mesh_obj.data
+    mesh.calc_normals()
+    candidates = {
+        "X": Vector((1.0, 0.0, 0.0)),
+        "Y": Vector((0.0, 1.0, 0.0)),
+        "Z": Vector((0.0, 0.0, 1.0)),
+    }
+    best = "Y"
+    best_score = -1
+    for k, axis in candidates.items():
+        score = sum(1 for p in mesh.polygons if abs(p.normal.dot(axis)) >= align_threshold)
+        if score > best_score:
+            best = k
+            best_score = score
+    return candidates[best]
+
+
+def detect_fin_thickness_axis_by_aabb(mesh_obj) -> Vector:
+    """
+    Detect fin thickness axis by choosing the smallest local AABB extent.
+    This is usually the best proxy for "the two broad side faces are ±this axis".
+    """
+    vmin, vmax = local_aabb(mesh_obj)
+    extents = {
+        "X": vmax.x - vmin.x,
+        "Y": vmax.y - vmin.y,
+        "Z": vmax.z - vmin.z,
+    }
+    axis = min(extents.items(), key=lambda kv: kv[1])[0]
+    return {"X": Vector((1.0, 0.0, 0.0)), "Y": Vector((0.0, 1.0, 0.0)), "Z": Vector((0.0, 0.0, 1.0))}[axis]
+
 # ============================================================
 # MATERIALS
 # ============================================================
@@ -277,10 +381,12 @@ mat_body = make_mat("Mat_Body", (0.75, 0.75, 0.78, 1.0))
 # Fin edge material (shared across fins).
 mat_fin_edge = make_mat("Mat_Fin_Edge", (0.18, 0.18, 0.20, 1.0))
 
+red = (1.0, 0.37, 0.43)
 # Per-fin side colors.
 # Customize these to whatever you want: 4 fins × (outer, inner).
 fin_outer_colors = [
-    (1.00, 0.35, 0.35, 1.0),  # Fin 0 outer
+    # (1.00, 0.35, 0.35, 1.0),  # Fin 0 outer
+    red,  # Fin 0 outer
     (1.00, 0.65, 0.20, 1.0),  # Fin 1 outer
     (0.35, 1.00, 0.50, 1.0),  # Fin 2 outer
     (0.85, 0.35, 1.00, 1.0),  # Fin 3 outer
@@ -290,8 +396,29 @@ fin_inner_colors = [
     (0.30, 0.70, 1.00, 1.0),  # Fin 0 inner
     (0.20, 0.95, 0.95, 1.0),  # Fin 1 inner
     (0.25, 0.35, 1.00, 1.0),  # Fin 2 inner
-    (1.00, 0.35, 0.85, 1.0),  # Fin 3 inner
+    red,  # Fin 3 inner
 ]
+
+# Paint fin sides via vertex colors (glTF COLOR_0) instead of using multiple materials.
+# This is often nicer for engines: fewer primitives, but still distinct colors per side.
+use_vertex_colors_for_fin_sides = False
+fin_edge_color = (0.18, 0.18, 0.20, 1.0)
+fin_vertex_color_layer = "Col"
+
+# Alternative: paint fin sides via a generated texture atlas + UVs.
+# This previews reliably in Blender after import.
+use_fin_texture_atlas = True
+fin_atlas_image_name = "FinAtlas"
+fin_atlas_size = 512  # px
+fin_uv_layer = "UVMap"
+
+# Which local axis represents the fin "side" normal (the two broad faces are ±this axis).
+# "AUTO" tries X/Y/Z and picks the one that best matches face normals.
+fin_side_axis_mode = "AUTO"  # "AUTO" | "X" | "Y" | "Z"
+fin_side_align_threshold = 0.65
+
+# Write the generated fin atlas to disk so it can be inspected.
+write_fin_atlas_png = True
 
 # ============================================================
 # LOAD BODY + FIN TEMPLATE
@@ -304,6 +431,10 @@ bake_object_rotation(body, (0.0, math.radians(body_y_rotation_degrees), 0.0))
 
 # If you want to preserve imported body materials, comment out the next line.
 assign_material(body, mat_body)
+
+# Ensure the active object's UV map exists before we join meshes later.
+# (Join tends to preserve UV maps from the active object; we keep names consistent.)
+ensure_uv_layer(body.data, fin_uv_layer)
 
 body_min, body_max = local_aabb(body)
 ai = axis_index(rocket_axis)
@@ -335,6 +466,178 @@ hinge_base = estimate_hinge_point(fin_template, rocket_axis, fin_anchor_t)
 radials = [radial_distance_from_axis(v.co, rocket_axis) for v in fin_template.data.vertices]
 radial_span = max(radials) - min(radials) if radials else 0.25
 
+# Decide which local axis represents the fin side faces.
+if fin_side_axis_mode.upper() == "AUTO":
+    fin_side_axis = detect_fin_thickness_axis_by_aabb(fin_template)
+else:
+    m = fin_side_axis_mode.upper()
+    fin_side_axis = {"X": Vector((1.0, 0.0, 0.0)), "Y": Vector((0.0, 1.0, 0.0)), "Z": Vector((0.0, 0.0, 1.0))}[m]
+
+# Create the fin atlas image/material (shared by all fins) if enabled.
+fin_atlas_img = None
+fin_atlas_mat = None
+if use_fin_texture_atlas:
+    # 4 cols (fins) x 3 rows (outer/inner/edge)
+    cols = 4
+    rows = 3
+    tile_w = fin_atlas_size // cols
+    tile_h = fin_atlas_size // rows
+
+    def _fill_pixels(size, outer_colors, inner_colors, edge_color):
+        pixels = [0.0] * (size * size * 4)
+
+        def set_px(x, y, rgba):
+            idx = (y * size + x) * 4
+            pixels[idx : idx + 4] = list(rgba)
+
+        def fill_tile(col, row, rgba):
+            x0 = col * tile_w
+            y0 = (rows - 1 - row) * tile_h
+            for yy in range(y0, min(y0 + tile_h, size)):
+                for xx in range(x0, min(x0 + tile_w, size)):
+                    set_px(xx, yy, rgba)
+
+        for ii in range(4):
+            fill_tile(ii, 0, outer_colors[ii])
+            fill_tile(ii, 1, inner_colors[ii])
+            fill_tile(ii, 2, edge_color)
+        return pixels
+
+    fin_atlas_img = bpy.data.images.get(fin_atlas_image_name)
+    if fin_atlas_img is None:
+        fin_atlas_img = bpy.data.images.new(
+            name=fin_atlas_image_name,
+            width=fin_atlas_size,
+            height=fin_atlas_size,
+            alpha=True,
+            float_buffer=True,
+        )
+    else:
+        fin_atlas_img.scale(fin_atlas_size, fin_atlas_size)
+
+    fin_atlas_img.pixels = _fill_pixels(fin_atlas_size, fin_outer_colors, fin_inner_colors, fin_edge_color)
+    try:
+        fin_atlas_img.pack()
+    except Exception:
+        pass
+    fin_atlas_img.colorspace_settings.name = "sRGB"
+
+    if write_fin_atlas_png:
+        atlas_path = Path(out_path).with_suffix("")
+        atlas_png = atlas_path.parent / f"{atlas_path.name}_fin_atlas.png"
+        atlas_png.parent.mkdir(parents=True, exist_ok=True)
+        fin_atlas_img.filepath_raw = str(atlas_png)
+        fin_atlas_img.file_format = "PNG"
+        try:
+            fin_atlas_img.save()
+            print(f"[assemble-rocket] Wrote fin atlas PNG: {atlas_png}")
+        except Exception as e:
+            print(f"[assemble-rocket] WARNING: failed to save fin atlas PNG: {e}")
+
+    fin_atlas_mat = make_image_texture_mat("Mat_Fin_Atlas", fin_atlas_img, fin_uv_layer)
+
+
+def paint_fin_sides_vertex_colors(
+    fin_obj,
+    local_axis: Vector,
+    color_pos_rgba,
+    color_neg_rgba,
+    edge_rgba,
+    layer_name: str = "Col",
+    align_threshold: float = 0.92,
+):
+    """
+    "Paint" the fin by writing vertex colors per face:
+    - faces whose normal aligns with +local_axis -> color_pos_rgba
+    - faces whose normal aligns with -local_axis -> color_neg_rgba
+    - all other faces -> edge_rgba
+    """
+    axis = local_axis.normalized()
+    mesh = fin_obj.data
+
+    # Ensure normals are up-to-date.
+    mesh.calc_normals()
+
+    vcol = mesh.vertex_colors.get(layer_name)
+    if vcol is None:
+        vcol = mesh.vertex_colors.new(name=layer_name)
+    # Make sure this is the active layer so glTF exporter picks it up (Blender 2.93).
+    mesh.vertex_colors.active = vcol
+    mesh.vertex_colors.active_index = mesh.vertex_colors.find(vcol.name)
+    try:
+        mesh.vertex_colors.active_render = vcol
+    except Exception:
+        pass
+
+    for poly in mesh.polygons:
+        d = poly.normal.dot(axis)
+        if abs(d) >= align_threshold:
+            col = color_pos_rgba if d > 0.0 else color_neg_rgba
+        else:
+            col = edge_rgba
+        for li in poly.loop_indices:
+            vcol.data[li].color = col
+
+
+def fin_tile_uv_rect(fin_index: int, row: int):
+    """Return (u0, v0, u1, v1) for a tile in the 4x3 atlas."""
+    cols = 4
+    rows = 3
+    u0 = fin_index / cols
+    u1 = (fin_index + 1) / cols
+    # v is bottom->top in UV space.
+    # Our image fill places row=0 at the TOP, row=rows-1 at the BOTTOM.
+    # So the UV rect for row r is:
+    # - bottom = (rows-(r+1))/rows
+    # - top    = (rows-r)/rows
+    v0 = (rows - (row + 1)) / rows
+    v1 = (rows - row) / rows
+    return (u0, v0, u1, v1)
+
+
+def assign_fin_uvs_for_atlas(fin_obj, fin_index: int, local_axis: Vector, uv_layer_name: str, align_threshold: float = 0.92):
+    """
+    Assign UVs so:
+    - +axis faces -> outer row (0)
+    - -axis faces -> inner row (1)
+    - others -> edge row (2)
+    """
+    axis = local_axis.normalized()
+    mesh = fin_obj.data
+
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.faces.ensure_lookup_table()
+    uv_layer = bm.loops.layers.uv.get(uv_layer_name)
+    if uv_layer is None:
+        uv_layer = bm.loops.layers.uv.new(uv_layer_name)
+
+    outer_rect = fin_tile_uv_rect(fin_index, 0)
+    inner_rect = fin_tile_uv_rect(fin_index, 1)
+    edge_rect = fin_tile_uv_rect(fin_index, 2)
+
+    def rect_uvs(rect):
+        u0, v0, u1, v1 = rect
+        return [Vector((u0, v0)), Vector((u1, v0)), Vector((u1, v1)), Vector((u0, v1))]
+
+    for f in bm.faces:
+        d = f.normal.dot(axis)
+        if abs(d) >= align_threshold:
+            rect = outer_rect if d > 0.0 else inner_rect
+        else:
+            rect = edge_rect
+
+        uvs = rect_uvs(rect)
+        loops = list(f.loops)
+        for li, loop in enumerate(loops):
+            loop[uv_layer].uv = uvs[li % 4]
+
+    bm.to_mesh(mesh)
+    bm.free()
+
 # ============================================================
 # CREATE FINS (distributed around rocket)
 # Each fin is fully weighted to its corresponding fin bone vertex group.
@@ -353,18 +656,34 @@ for i in range(fin_count):
     fin.name = f"FinObj_{i}"
     bpy.context.scene.collection.objects.link(fin)
 
-    # Two-sided fin materials (side A vs side B).
-    # Our fin thickness is along local +Y/-Y.
-    # Ensure object transform is identity before assigning (it should be after import+apply).
-    mat_fin_outer = make_mat(f"Mat_Fin{i}_Outer", fin_outer_colors[i])
-    mat_fin_inner = make_mat(f"Mat_Fin{i}_Inner", fin_inner_colors[i])
-    assign_fin_two_sided_materials(
-        fin,
-        Vector((0.0, 1.0, 0.0)),
-        mat_fin_outer,
-        mat_fin_inner,
-        mat_fin_edge,
-    )
+    # Color the fin sides.
+    # Convention: fin "sides" are the two broad faces whose normals align with ±fin_side_axis.
+    if use_fin_texture_atlas:
+        assign_material(fin, fin_atlas_mat)
+        ensure_uv_layer(fin.data, fin_uv_layer)
+        assign_fin_uvs_for_atlas(fin, i, fin_side_axis, fin_uv_layer, align_threshold=fin_side_align_threshold)
+    elif use_vertex_colors_for_fin_sides:
+        # Use a single material so vertex colors show "as-is" in most engines.
+        assign_material(fin, make_vertex_color_mat("Mat_Fin_VCol", fin_vertex_color_layer))
+        paint_fin_sides_vertex_colors(
+            fin,
+            fin_side_axis,
+            fin_outer_colors[i],
+            fin_inner_colors[i],
+            fin_edge_color,
+            layer_name=fin_vertex_color_layer,
+        )
+    else:
+        # Material-based split (older approach).
+        mat_fin_outer = make_mat(f"Mat_Fin{i}_Outer", fin_outer_colors[i])
+        mat_fin_inner = make_mat(f"Mat_Fin{i}_Inner", fin_inner_colors[i])
+        assign_fin_two_sided_materials(
+            fin,
+            Vector((0.0, 1.0, 0.0)),
+            mat_fin_outer,
+            mat_fin_inner,
+            mat_fin_edge,
+        )
 
     if place_fins_from_template:
         # Fin.glb is already placed correctly; just duplicate and spin copies around the rocket axis
@@ -522,6 +841,7 @@ bpy.ops.export_scene.gltf(
     use_selection=True,
     export_yup=True,
     export_apply=False,
+    export_colors=True,
     export_skins=True,
     export_animations=False,
 )
