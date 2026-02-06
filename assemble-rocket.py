@@ -126,8 +126,13 @@ def make_vertex_color_mat(name: str, layer_name: str):
     return mat
 
 
-def make_image_texture_mat(name: str, image: bpy.types.Image, uv_layer_name: str):
-    """Material that displays an Image Texture using the given UV map (reliable Blender preview)."""
+def make_image_texture_mat(name: str, image: bpy.types.Image, uv_layer_name: str, extension: str = "CLIP"):
+    """
+    Material that displays an Image Texture using the given UV map (reliable Blender preview).
+
+    - extension="CLIP": clamp outside 0..1 (good for atlases)
+    - extension="REPEAT": wrap (good for cylindrical body UVs, avoids seam interpolation artifacts)
+    """
     mat = bpy.data.materials.get(name)
     if mat is None:
         mat = bpy.data.materials.new(name=name)
@@ -144,7 +149,7 @@ def make_image_texture_mat(name: str, image: bpy.types.Image, uv_layer_name: str
     tex.location = (-60, 0)
     tex.image = image
     tex.interpolation = "Closest"
-    tex.extension = "CLIP"
+    tex.extension = extension
 
     uv = nt.nodes.new("ShaderNodeUVMap")
     uv.location = (-260, -40)
@@ -338,59 +343,20 @@ def ensure_uv_layer(mesh: bpy.types.Mesh, uv_name: str):
     return uv
 
 
-def assign_cylindrical_uvs(mesh_obj, axis: str, uv_layer_name: str, u_offset_degrees: float = 0.0):
-    """
-    Assign simple cylindrical UVs:
-    - U wraps around the rocket axis
-    - V runs along the rocket axis from min..max
-    """
-    axis = axis.upper()
-    mesh = mesh_obj.data
-    if bpy.context.mode != "OBJECT":
-        bpy.ops.object.mode_set(mode="OBJECT")
-
-    bm = bmesh.new()
-    bm.from_mesh(mesh)
-    bm.faces.ensure_lookup_table()
-    uv_layer = bm.loops.layers.uv.get(uv_layer_name)
-    if uv_layer is None:
-        uv_layer = bm.loops.layers.uv.new(uv_layer_name)
-
-    vmin, vmax = local_aabb(mesh_obj)
-    if axis == "X":
-        amin, amax = vmin.x, vmax.x
-    elif axis == "Y":
-        amin, amax = vmin.y, vmax.y
-    else:
-        amin, amax = vmin.z, vmax.z
-    alen = max(1e-6, amax - amin)
-
-    two_pi = 2.0 * math.pi
-    u_offset = (u_offset_degrees / 360.0) % 1.0
-    for f in bm.faces:
-        for loop in f.loops:
-            co = loop.vert.co
-            if axis == "X":
-                u = (math.atan2(co.z, co.y) / two_pi) + 0.5
-                v = (co.x - amin) / alen
-            elif axis == "Y":
-                u = (math.atan2(co.x, co.z) / two_pi) + 0.5
-                v = (co.y - amin) / alen
-            else:  # "Z"
-                u = (math.atan2(co.y, co.x) / two_pi) + 0.5
-                v = (co.z - amin) / alen
-            u = (u + u_offset) % 1.0
-            loop[uv_layer].uv = (u, v)
-
-    bm.to_mesh(mesh)
-    bm.free()
-
-
-def create_body_paint_image(name: str, size: int, band_v0: float, band_v1: float, sector_colors):
+def create_body_paint_image_with_cap(
+    name: str,
+    size: int,
+    side_band_v0: float,
+    side_band_v1: float,
+    cap_v0: float,
+    cap_v1: float,
+    sector_colors,
+):
     """
     Create an image where:
     - everything is black
-    - band region (v in [band_v0..band_v1]) is split into 4 U sectors with colors
+    - side band (v in [side_band_v0..side_band_v1]) is split into 4 U sectors
+    - bottom cap region (v in [cap_v0..cap_v1]) is a 4-quadrant disc
     """
     img = bpy.data.images.get(name)
     if img is None:
@@ -406,13 +372,18 @@ def create_body_paint_image(name: str, size: int, band_v0: float, band_v1: float
 
     black = (0.0, 0.0, 0.0, 1.0)
 
-    # Fill all black first.
+    # Fill all black.
     for y in range(size):
         for x in range(size):
             set_px(x, y, black)
 
-    y0 = max(0, min(size, int(round(size * max(0.0, min(1.0, band_v0))))))
-    y1 = max(0, min(size, int(round(size * max(0.0, min(1.0, band_v1))))))
+    def y_from_v(v: float) -> int:
+        # Our pixels are written with y=0 at bottom of the image.
+        return max(0, min(size, int(round(size * max(0.0, min(1.0, v))))))
+
+    # Side band: 4 sectors by U.
+    y0 = y_from_v(side_band_v0)
+    y1 = y_from_v(side_band_v1)
     if y1 < y0:
         y0, y1 = y1, y0
     if y1 == y0:
@@ -423,6 +394,31 @@ def create_body_paint_image(name: str, size: int, band_v0: float, band_v1: float
             sector = min(3, int((x / size) * 4))
             set_px(x, y, sector_colors[sector])
 
+    # Bottom cap: quadrant disc in [cap_v0..cap_v1].
+    cy0 = y_from_v(cap_v0)
+    cy1 = y_from_v(cap_v1)
+    if cy1 < cy0:
+        cy0, cy1 = cy1, cy0
+    if cy1 == cy0:
+        cy1 = min(size, cy0 + 1)
+
+    cap_h = max(1, cy1 - cy0)
+    for y in range(cy0, cy1):
+        # local v in [0..1]
+        lv = (y - cy0 + 0.5) / cap_h
+        for x in range(size):
+            u = (x + 0.5) / size
+            yy = (u - 0.5) * 2.0
+            zz = (lv - 0.5) * 2.0
+            r = math.sqrt(yy * yy + zz * zz)
+            if r > 1.0:
+                continue  # keep black outside the disc
+            ang = math.atan2(zz, yy)
+            if ang < 0:
+                ang += 2.0 * math.pi
+            sector = int(ang / (math.pi / 2.0)) % 4
+            set_px(x, y, sector_colors[sector])
+
     img.pixels = pixels
     try:
         img.pack()
@@ -430,6 +426,117 @@ def create_body_paint_image(name: str, size: int, band_v0: float, band_v1: float
         pass
     img.colorspace_settings.name = "sRGB"
     return img
+
+
+def assign_body_uvs_with_bottom_cap_quadrants(
+    mesh_obj,
+    axis: str,
+    uv_layer_name: str,
+    u_offset_degrees: float,
+    side_v_max: float,
+    cap_v0: float,
+    cap_v1: float,
+    cap_rotation_degrees: float = 0.0,
+):
+    """
+    Assign UVs for the body:
+    - side faces: cylindrical projection (U=angle, V=axis) mapped into v in [0..side_v_max]
+    - bottom cap (negative axis normal): planar projection into cap region [cap_v0..cap_v1]
+    - top cap: constant UV (black)
+    """
+    axis = axis.upper()
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    mesh = mesh_obj.data
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.faces.ensure_lookup_table()
+    uv_layer = bm.loops.layers.uv.get(uv_layer_name)
+    if uv_layer is None:
+        uv_layer = bm.loops.layers.uv.new(uv_layer_name)
+
+    vmin, vmax = local_aabb(mesh_obj)
+    if axis == "X":
+        amin, amax = vmin.x, vmax.x
+        # radius is in YZ plane
+        rmax = max(math.sqrt(v.co.y * v.co.y + v.co.z * v.co.z) for v in bm.verts) if bm.verts else 1.0
+        axis_vec = Vector((1.0, 0.0, 0.0))
+    elif axis == "Y":
+        amin, amax = vmin.y, vmax.y
+        rmax = max(math.sqrt(v.co.x * v.co.x + v.co.z * v.co.z) for v in bm.verts) if bm.verts else 1.0
+        axis_vec = Vector((0.0, 1.0, 0.0))
+    else:
+        amin, amax = vmin.z, vmax.z
+        rmax = max(math.sqrt(v.co.x * v.co.x + v.co.y * v.co.y) for v in bm.verts) if bm.verts else 1.0
+        axis_vec = Vector((0.0, 0.0, 1.0))
+
+    alen = max(1e-6, amax - amin)
+    rmax = max(1e-6, rmax)
+
+    two_pi = 2.0 * math.pi
+    u_offset = (u_offset_degrees / 360.0) % 1.0
+    cap_rot = Matrix.Rotation(math.radians(u_offset_degrees + cap_rotation_degrees), 4, axis)
+
+    cap_threshold = 0.9
+    for f in bm.faces:
+        nd = f.normal.dot(axis_vec)
+        is_bottom_cap = nd <= -cap_threshold
+        is_top_cap = nd >= cap_threshold
+
+        for loop in f.loops:
+            co = loop.vert.co
+
+            if is_top_cap:
+                loop[uv_layer].uv = (0.5, 0.5)  # black region
+                continue
+
+            if is_bottom_cap:
+                # Rotate the radial plane so the quadrant pattern aligns with fins.
+                co_r = cap_rot @ co
+                if axis == "X":
+                    yy, zz = co_r.y, co_r.z
+                elif axis == "Y":
+                    yy, zz = co_r.x, co_r.z
+                else:
+                    yy, zz = co_r.x, co_r.y
+
+                u = 0.5 + (yy / (2.0 * rmax))
+                v_local = 0.5 + (zz / (2.0 * rmax))
+                v = cap_v0 + v_local * (cap_v1 - cap_v0)
+                loop[uv_layer].uv = (max(0.0, min(1.0, u)), max(0.0, min(1.0, v)))
+                continue
+
+            # Side faces: cylindrical.
+            # We compute U in [0..1), then "unwrap" per-face so triangles crossing the seam
+            # don't interpolate through the other sectors (the artifact you saw).
+            if axis == "X":
+                u0 = (math.atan2(co.z, co.y) / two_pi) + 0.5
+                v0 = (co.x - amin) / alen
+            elif axis == "Y":
+                u0 = (math.atan2(co.x, co.z) / two_pi) + 0.5
+                v0 = (co.y - amin) / alen
+            else:  # "Z"
+                u0 = (math.atan2(co.y, co.x) / two_pi) + 0.5
+                v0 = (co.z - amin) / alen
+
+            u_mod = (u0 + u_offset) % 1.0
+            v = max(0.0, min(1.0, v0)) * side_v_max
+            loop[uv_layer].uv = (u_mod, v)
+
+        # Seam unwrap pass for side faces: if a face spans both ends of [0..1), shift low-U up by +1.
+        if not (is_bottom_cap or is_top_cap):
+            uvs = [loop[uv_layer].uv.copy() for loop in f.loops]
+            us = [uv.x for uv in uvs]
+            if us and (max(us) - min(us) > 0.5):
+                for loop in f.loops:
+                    uv = loop[uv_layer].uv
+                    if uv.x < 0.5:
+                        uv.x += 1.0
+                        loop[uv_layer].uv = uv
+
+    bm.to_mesh(mesh)
+    bm.free()
 
 
 def detect_fin_side_axis(mesh_obj, align_threshold: float = 0.80) -> Vector:
@@ -475,6 +582,7 @@ mat_body = make_mat("Mat_Body", (0.75, 0.75, 0.78, 1.0))
 # Fin edge material (shared across fins).
 mat_fin_edge = make_mat("Mat_Fin_Edge", (0.18, 0.18, 0.20, 1.0))
 
+black = (0.0, 0.0, 0.0, 1.0)
 red = (1.0, 0.37, 0.43, 1.0)
 green = (0.29, 0.82, 0.44, 1.0)
 yellow = (0.86, 0.93, 0.44, 1.0)
@@ -497,16 +605,24 @@ fin_inner_colors = [
     red,  # Fin 3 inner
 ]
 
-# Body paint via texture (black body + colored band near the tail).
+# Body paint via texture (black body + colored band + colored bottom cap quadrants).
 use_body_paint_texture = True
 body_paint_image_name = "BodyPaint"
-body_paint_size = 1024  # px (square)
+body_paint_size = 1024  # px
+body_uv_layer = "UVMap"
+
 # Band is measured from the body's "bottom" along rocket_axis (min axis value).
 body_band_start_m = 0.0
 body_band_length_m = 0.0508  # 2 inches
-# Rotate the colored sectors around the rocket axis (degrees).
-# Positive values rotate the pattern in the same direction as a positive rotation about rocket_axis.
+
+# Rotate the colored sectors around the rocket axis (degrees) to align with fins.
 body_sector_u_offset_degrees = 135.0
+
+# Reserve top portion of the texture for the bottom-cap quadrant disc.
+body_cap_v0 = 0.75
+body_cap_v1 = 1.0
+body_cap_rotation_degrees = 180.0
+
 write_body_paint_png = True
 
 # Paint fin sides via vertex colors (glTF COLOR_0) instead of using multiple materials.
@@ -544,23 +660,41 @@ assign_material(body, mat_body)
 
 # Ensure the active object's UV map exists before we join meshes later.
 # (Join tends to preserve UV maps from the active object; we keep names consistent.)
-ensure_uv_layer(body.data, fin_uv_layer)
+ensure_uv_layer(body.data, body_uv_layer)
 
 body_min, body_max = local_aabb(body)
 ai = axis_index(rocket_axis)
 body_axis_min = body_min[ai]
 body_axis_max = body_max[ai]
 
-# Body paint: black base + colored band near tail (matches fin colors).
+# Paint the body (black everywhere, colored band + bottom cap quadrants).
 if use_body_paint_texture:
-    assign_cylindrical_uvs(body, rocket_axis, fin_uv_layer, u_offset_degrees=body_sector_u_offset_degrees)
-
+    side_v_max = body_cap_v0
     body_axis_len = max(1e-6, body_axis_max - body_axis_min)
-    band_v0 = (body_band_start_m) / body_axis_len
-    band_v1 = (body_band_start_m + body_band_length_m) / body_axis_len
-    # Use the fin outer colors as the 4 sectors around the rocket.
-    body_img = create_body_paint_image(body_paint_image_name, body_paint_size, band_v0, band_v1, fin_outer_colors)
-    body_mat = make_image_texture_mat("Mat_Body_Paint", body_img, fin_uv_layer)
+    band_v0 = (body_band_start_m / body_axis_len) * side_v_max
+    band_v1 = ((body_band_start_m + body_band_length_m) / body_axis_len) * side_v_max
+
+    assign_body_uvs_with_bottom_cap_quadrants(
+        body,
+        rocket_axis,
+        body_uv_layer,
+        u_offset_degrees=body_sector_u_offset_degrees,
+        side_v_max=side_v_max,
+        cap_v0=body_cap_v0,
+        cap_v1=body_cap_v1,
+        cap_rotation_degrees=body_cap_rotation_degrees,
+    )
+
+    body_img = create_body_paint_image_with_cap(
+        body_paint_image_name,
+        body_paint_size,
+        side_band_v0=band_v0,
+        side_band_v1=band_v1,
+        cap_v0=body_cap_v0,
+        cap_v1=body_cap_v1,
+        sector_colors=fin_outer_colors,
+    )
+    body_mat = make_image_texture_mat("Mat_Body_Paint", body_img, body_uv_layer, extension="REPEAT")
     assign_material(body, body_mat)
 
     if write_body_paint_png:
@@ -668,7 +802,7 @@ if use_fin_texture_atlas:
         except Exception as e:
             print(f"[assemble-rocket] WARNING: failed to save fin atlas PNG: {e}")
 
-    fin_atlas_mat = make_image_texture_mat("Mat_Fin_Atlas", fin_atlas_img, fin_uv_layer)
+    fin_atlas_mat = make_image_texture_mat("Mat_Fin_Atlas", fin_atlas_img, fin_uv_layer, extension="CLIP")
 
 
 def paint_fin_sides_vertex_colors(
@@ -753,21 +887,68 @@ def assign_fin_uvs_for_atlas(fin_obj, fin_index: int, local_axis: Vector, uv_lay
     inner_rect = fin_tile_uv_rect(fin_index, 1)
     edge_rect = fin_tile_uv_rect(fin_index, 2)
 
-    def rect_uvs(rect):
+    # Use a projection-based UV assignment so it works for tris/quads/ngons.
+    # Project onto the plane perpendicular to the side axis and normalize by the fin's bounds.
+    side = local_axis.normalized()
+    if abs(side.dot(Vector((1.0, 0.0, 0.0)))) > 0.9:
+        # side axis ~ X, use YZ plane
+        a_idx, b_idx = 1, 2
+    elif abs(side.dot(Vector((0.0, 1.0, 0.0)))) > 0.9:
+        # side axis ~ Y, use XZ plane
+        a_idx, b_idx = 0, 2
+    else:
+        # side axis ~ Z, use XY plane
+        a_idx, b_idx = 0, 1
+
+    verts = [v.co for v in bm.verts]
+    a_vals = [v[a_idx] for v in verts] or [0.0]
+    b_vals = [v[b_idx] for v in verts] or [0.0]
+    a_min, a_max = min(a_vals), max(a_vals)
+    b_min, b_max = min(b_vals), max(b_vals)
+    a_len = max(1e-6, a_max - a_min)
+    b_len = max(1e-6, b_max - b_min)
+
+    def map_into_rect(rect, a_norm: float, b_norm: float):
         u0, v0, u1, v1 = rect
-        return [Vector((u0, v0)), Vector((u1, v0)), Vector((u1, v1)), Vector((u0, v1))]
+        u = u0 + max(0.0, min(1.0, a_norm)) * (u1 - u0)
+        v = v0 + max(0.0, min(1.0, b_norm)) * (v1 - v0)
+        return (u, v)
+
+    # Hybrid classification:
+    # - Prefer face normal when it's aligned to the side axis (most reliable for the big side faces).
+    # - Otherwise fall back to vertex-side "majority vote" (handles base topology where normals get messy).
+    s_vals = [v.co.dot(axis) for v in bm.verts] or [0.0]
+    s_min, s_max = min(s_vals), max(s_vals)
+    s_len = max(1e-6, s_max - s_min)
+    # If the mesh straddles 0 along this axis, use 0 as the mid-plane; otherwise use midpoint.
+    s_mid = 0.0 if (s_min < 0.0 < s_max) else (s_min + s_max) * 0.5
+    s_eps = 0.01 * s_len
 
     for f in bm.faces:
         d = f.normal.dot(axis)
         if abs(d) >= align_threshold:
             rect = outer_rect if d > 0.0 else inner_rect
         else:
-            rect = edge_rect
+            signed = [loop.vert.co.dot(axis) - s_mid for loop in f.loops]
+            pos = sum(1 for s in signed if s > s_eps)
+            neg = sum(1 for s in signed if s < -s_eps)
+            # Majority vote with a bias toward "side" if one sign dominates.
+            if pos > neg * 2 and pos > 0:
+                rect = outer_rect
+            elif neg > pos * 2 and neg > 0:
+                rect = inner_rect
+            elif pos > 0 and neg == 0:
+                rect = outer_rect
+            elif neg > 0 and pos == 0:
+                rect = inner_rect
+            else:
+                rect = edge_rect
 
-        uvs = rect_uvs(rect)
-        loops = list(f.loops)
-        for li, loop in enumerate(loops):
-            loop[uv_layer].uv = uvs[li % 4]
+        for loop in f.loops:
+            co = loop.vert.co
+            a_norm = (co[a_idx] - a_min) / a_len
+            b_norm = (co[b_idx] - b_min) / b_len
+            loop[uv_layer].uv = map_into_rect(rect, a_norm, b_norm)
 
     bm.to_mesh(mesh)
     bm.free()
