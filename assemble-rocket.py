@@ -338,6 +338,100 @@ def ensure_uv_layer(mesh: bpy.types.Mesh, uv_name: str):
     return uv
 
 
+def assign_cylindrical_uvs(mesh_obj, axis: str, uv_layer_name: str, u_offset_degrees: float = 0.0):
+    """
+    Assign simple cylindrical UVs:
+    - U wraps around the rocket axis
+    - V runs along the rocket axis from min..max
+    """
+    axis = axis.upper()
+    mesh = mesh_obj.data
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.faces.ensure_lookup_table()
+    uv_layer = bm.loops.layers.uv.get(uv_layer_name)
+    if uv_layer is None:
+        uv_layer = bm.loops.layers.uv.new(uv_layer_name)
+
+    vmin, vmax = local_aabb(mesh_obj)
+    if axis == "X":
+        amin, amax = vmin.x, vmax.x
+    elif axis == "Y":
+        amin, amax = vmin.y, vmax.y
+    else:
+        amin, amax = vmin.z, vmax.z
+    alen = max(1e-6, amax - amin)
+
+    two_pi = 2.0 * math.pi
+    u_offset = (u_offset_degrees / 360.0) % 1.0
+    for f in bm.faces:
+        for loop in f.loops:
+            co = loop.vert.co
+            if axis == "X":
+                u = (math.atan2(co.z, co.y) / two_pi) + 0.5
+                v = (co.x - amin) / alen
+            elif axis == "Y":
+                u = (math.atan2(co.x, co.z) / two_pi) + 0.5
+                v = (co.y - amin) / alen
+            else:  # "Z"
+                u = (math.atan2(co.y, co.x) / two_pi) + 0.5
+                v = (co.z - amin) / alen
+            u = (u + u_offset) % 1.0
+            loop[uv_layer].uv = (u, v)
+
+    bm.to_mesh(mesh)
+    bm.free()
+
+
+def create_body_paint_image(name: str, size: int, band_v0: float, band_v1: float, sector_colors):
+    """
+    Create an image where:
+    - everything is black
+    - band region (v in [band_v0..band_v1]) is split into 4 U sectors with colors
+    """
+    img = bpy.data.images.get(name)
+    if img is None:
+        img = bpy.data.images.new(name=name, width=size, height=size, alpha=True, float_buffer=True)
+    else:
+        img.scale(size, size)
+
+    pixels = [0.0] * (size * size * 4)
+
+    def set_px(x, y, rgba):
+        idx = (y * size + x) * 4
+        pixels[idx : idx + 4] = list(rgba)
+
+    black = (0.0, 0.0, 0.0, 1.0)
+
+    # Fill all black first.
+    for y in range(size):
+        for x in range(size):
+            set_px(x, y, black)
+
+    y0 = max(0, min(size, int(round(size * max(0.0, min(1.0, band_v0))))))
+    y1 = max(0, min(size, int(round(size * max(0.0, min(1.0, band_v1))))))
+    if y1 < y0:
+        y0, y1 = y1, y0
+    if y1 == y0:
+        y1 = min(size, y0 + 1)
+
+    for y in range(y0, y1):
+        for x in range(size):
+            sector = min(3, int((x / size) * 4))
+            set_px(x, y, sector_colors[sector])
+
+    img.pixels = pixels
+    try:
+        img.pack()
+    except Exception:
+        pass
+    img.colorspace_settings.name = "sRGB"
+    return img
+
+
 def detect_fin_side_axis(mesh_obj, align_threshold: float = 0.80) -> Vector:
     """
     Pick which local axis (X/Y/Z) best matches the fin's broad side face normals.
@@ -403,6 +497,18 @@ fin_inner_colors = [
     red,  # Fin 3 inner
 ]
 
+# Body paint via texture (black body + colored band near the tail).
+use_body_paint_texture = True
+body_paint_image_name = "BodyPaint"
+body_paint_size = 1024  # px (square)
+# Band is measured from the body's "bottom" along rocket_axis (min axis value).
+body_band_start_m = 0.0
+body_band_length_m = 0.0508  # 2 inches
+# Rotate the colored sectors around the rocket axis (degrees).
+# Positive values rotate the pattern in the same direction as a positive rotation about rocket_axis.
+body_sector_u_offset_degrees = 135.0
+write_body_paint_png = True
+
 # Paint fin sides via vertex colors (glTF COLOR_0) instead of using multiple materials.
 # This is often nicer for engines: fewer primitives, but still distinct colors per side.
 use_vertex_colors_for_fin_sides = False
@@ -444,6 +550,30 @@ body_min, body_max = local_aabb(body)
 ai = axis_index(rocket_axis)
 body_axis_min = body_min[ai]
 body_axis_max = body_max[ai]
+
+# Body paint: black base + colored band near tail (matches fin colors).
+if use_body_paint_texture:
+    assign_cylindrical_uvs(body, rocket_axis, fin_uv_layer, u_offset_degrees=body_sector_u_offset_degrees)
+
+    body_axis_len = max(1e-6, body_axis_max - body_axis_min)
+    band_v0 = (body_band_start_m) / body_axis_len
+    band_v1 = (body_band_start_m + body_band_length_m) / body_axis_len
+    # Use the fin outer colors as the 4 sectors around the rocket.
+    body_img = create_body_paint_image(body_paint_image_name, body_paint_size, band_v0, band_v1, fin_outer_colors)
+    body_mat = make_image_texture_mat("Mat_Body_Paint", body_img, fin_uv_layer)
+    assign_material(body, body_mat)
+
+    if write_body_paint_png:
+        body_png = Path(out_path).with_suffix("")
+        body_png = body_png.parent / f"{body_png.name}_body_paint.png"
+        body_png.parent.mkdir(parents=True, exist_ok=True)
+        body_img.filepath_raw = str(body_png)
+        body_img.file_format = "PNG"
+        try:
+            body_img.save()
+            print(f"[assemble-rocket] Wrote body paint PNG: {body_png}")
+        except Exception as e:
+            print(f"[assemble-rocket] WARNING: failed to save body paint PNG: {e}")
 
 fin_min, fin_max = local_aabb(fin_template)
 fin_axis_len = fin_max[ai] - fin_min[ai]
