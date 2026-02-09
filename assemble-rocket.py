@@ -428,6 +428,93 @@ def create_body_paint_image_with_cap(
     return img
 
 
+def composite_logo_into_body_paint(
+    body_img: bpy.types.Image,
+    logo_img: bpy.types.Image,
+    u_center: float,
+    v_center: float,
+    logo_height_v: float,
+    logo_rotation_degrees: float,
+):
+    """
+    Alpha-composite `logo_img` onto `body_img` in UV space.
+    - U wraps (logo can cross seam)
+    - V is clamped
+    """
+    size = int(body_img.size[0])
+    if size <= 0 or body_img.size[1] != size:
+        raise RuntimeError("Body paint image must be square")
+
+    lw, lh = int(logo_img.size[0]), int(logo_img.size[1])
+    if lw <= 0 or lh <= 0:
+        raise RuntimeError("Logo image has invalid dimensions")
+
+    # Read pixels (flat RGBA float arrays).
+    dst = list(body_img.pixels)
+    src = list(logo_img.pixels)
+
+    # Desired logo size in pixels (preserve aspect ratio).
+    logo_h_px = max(1, int(round(size * max(0.0, min(1.0, logo_height_v)))))
+    logo_w_px = max(1, int(round(logo_h_px * (lw / float(lh)))))
+
+    x_center = int(round((u_center % 1.0) * size))
+    y_center = int(round(max(0.0, min(1.0, v_center)) * size))
+    x0 = x_center - logo_w_px // 2
+    y0 = y_center - logo_h_px // 2
+
+    def get_src_rgba(sx: int, sy: int):
+        sx = max(0, min(lw - 1, sx))
+        sy = max(0, min(lh - 1, sy))
+        idx = (sy * lw + sx) * 4
+        return src[idx], src[idx + 1], src[idx + 2], src[idx + 3]
+
+    def blend(dst_rgba, src_rgba):
+        dr, dg, db, da = dst_rgba
+        sr, sg, sb, sa = src_rgba
+        out_a = sa + da * (1.0 - sa)
+        if out_a <= 1e-6:
+            return 0.0, 0.0, 0.0, 0.0
+        out_r = (sr * sa + dr * da * (1.0 - sa)) / out_a
+        out_g = (sg * sa + dg * da * (1.0 - sa)) / out_a
+        out_b = (sb * sa + db * da * (1.0 - sa)) / out_a
+        return out_r, out_g, out_b, out_a
+
+    theta = math.radians(logo_rotation_degrees)
+    c, s = math.cos(theta), math.sin(theta)
+
+    for yy in range(logo_h_px):
+        y = y0 + yy
+        if y < 0 or y >= size:
+            continue
+
+        for xx in range(logo_w_px):
+            x = x0 + xx
+            xw = x % size  # wrap around U
+
+            # Logo-local coords in [-0.5, 0.5], rotate around center.
+            u = (xx + 0.5) / logo_w_px
+            v = (yy + 0.5) / logo_h_px
+            lx = u - 0.5
+            ly = v - 0.5
+            rx = lx * c - ly * s
+            ry = lx * s + ly * c
+            su = rx + 0.5
+            sv = ry + 0.5
+            sx = int(su * lw)
+            sy = int(sv * lh)
+
+            sr, sg, sb, sa = get_src_rgba(sx, sy)
+            if sa <= 1e-4:
+                continue
+
+            didx = (y * size + xw) * 4
+            dr, dg, db, da = dst[didx], dst[didx + 1], dst[didx + 2], dst[didx + 3]
+            out = blend((dr, dg, db, da), (sr, sg, sb, sa))
+            dst[didx : didx + 4] = out
+
+    body_img.pixels = dst
+
+
 def assign_body_uvs_with_bottom_cap_quadrants(
     mesh_obj,
     axis: str,
@@ -611,6 +698,14 @@ body_paint_image_name = "BodyPaint"
 body_paint_size = 1024  # px
 body_uv_layer = "UVMap"
 
+# Logo (placed on the cylinder side region, i.e. before the bottom cap area).
+use_body_logo = True
+body_logo_path = Path(__file__).resolve().parent / "logo 10-8.png"
+body_logo_u_center_degrees = 180.0 - 35.0  # 0° points at +Y when rocket_axis=="X"
+body_logo_v_center_t = 0.55  # 0..1 along the side region only
+body_logo_height_t = 0.18  # 0..1 of the side region height (keeps aspect ratio)
+body_logo_rotation_degrees = 90.0
+
 # Band is measured from the body's "bottom" along rocket_axis (min axis value).
 body_band_start_m = 0.0
 body_band_length_m = 0.0508  # 2 inches
@@ -694,6 +789,31 @@ if use_body_paint_texture:
         cap_v1=body_cap_v1,
         sector_colors=fin_outer_colors,
     )
+
+    # Composite the logo onto the side region (not the bottom cap).
+    if use_body_logo and body_logo_path.exists():
+        try:
+            logo_img = bpy.data.images.load(filepath=str(body_logo_path), check_existing=True)
+            # Place logo using side-region UVs.
+            side_v_max = body_cap_v0
+            u_center = (body_logo_u_center_degrees / 360.0 + 0.5) % 1.0
+            v_center = max(0.0, min(1.0, body_logo_v_center_t)) * side_v_max
+            logo_h_v = max(0.0, min(1.0, body_logo_height_t)) * side_v_max
+            composite_logo_into_body_paint(
+                body_img,
+                logo_img,
+                u_center=u_center,
+                v_center=v_center,
+                logo_height_v=logo_h_v,
+                logo_rotation_degrees=body_logo_rotation_degrees,
+            )
+            try:
+                body_img.pack()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[assemble-rocket] WARNING: failed to apply logo: {e}")
+
     body_mat = make_image_texture_mat("Mat_Body_Paint", body_img, body_uv_layer, extension="REPEAT")
     assign_material(body, body_mat)
 
