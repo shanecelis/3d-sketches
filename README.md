@@ -2,7 +2,12 @@
 
 Small Bevy + Blender playground for procedural models, rigging, and picking.
 
+## Caution
+
 It's more of a sketchpad than a proper project for external use.
+
+There are models referenced by scripts which cannot be legally included in this
+repository. Sorry.
 
 ## What’s in here
 
@@ -21,6 +26,8 @@ It's more of a sketchpad than a proper project for external use.
     - Generates inspection textures in `assets/` (body paint, fin atlas)
   - `axes-cube.py`: generates an “axes cube” widget GLB with separately pickable faces/borders/corners
   - `crazyflie-rig.py`: imports `crazyflie.glb`, adds an armature for `propeller*` meshes, exports `crazyflie-rigged.glb`
+  - `reload-script.py`: Copy-and-paste this to your Blender scripting window, so
+    you can easily reload/reimport a model from a file.
 
 ## Assets
 
