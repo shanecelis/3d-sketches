@@ -984,10 +984,57 @@ if use_fin_texture_atlas:
                 for xx in range(x0, min(x0 + tile_w, size)):
                     set_px(xx, yy, rgba)
 
+        def draw_disc(cx, cy, r_px, rgba):
+            r2 = r_px * r_px
+            x0 = max(0, int(cx - r_px))
+            x1 = min(size - 1, int(cx + r_px))
+            y0 = max(0, int(cy - r_px))
+            y1 = min(size - 1, int(cy + r_px))
+            for yy in range(y0, y1 + 1):
+                dy = yy - cy
+                for xx in range(x0, x1 + 1):
+                    dx = xx - cx
+                    if dx * dx + dy * dy <= r2:
+                        set_px(xx, yy, rgba)
+
+        def draw_fin_index_dots(col, row, dot_count: int):
+            """
+            Draw 1/2/3 dots in a tile to label Fin_1/2/3.
+            We draw a white ring + black center so it's visible on any fin color.
+            """
+            if dot_count <= 0:
+                return
+            x0 = col * tile_w
+            y0 = (rows - 1 - row) * tile_h
+            # Place dots near the top-left of the tile (but inside margin).
+            margin_x = max(2, int(tile_w * 0.15))
+            margin_y = max(2, int(tile_h * 0.15))
+            spacing = max(3, int(tile_w * 0.20))
+            r_outer = max(2, int(min(tile_w, tile_h) * 0.075))
+            r_inner = max(1, int(r_outer * 0.55))
+
+            for k in range(dot_count):
+                # cx = x0 + margin_x + k * spacing
+                cx = x0 + spacing - 0 * dot_count * spacing / 4 + k * spacing
+                # cy = y0 + tile_h - margin_y  # remember: y=0 is bottom
+                cy = y0 + tile_h /2  # remember: y=0 is bottom
+                # draw_disc(cx, cy, r_outer, (1.0, 1.0, 1.0, 1.0)) # white dot
+                # draw_disc(cx, cy, r_inner, (0.0, 0.0, 0.0, 1.0)) # black dot
+                draw_disc(cx, cy, r_outer, (0.0, 0.0, 0.0, 1.0)) # black dot
+
         for ii in range(4):
             fill_tile(ii, 0, outer_colors[ii])
             fill_tile(ii, 1, inner_colors[ii])
             fill_tile(ii, 2, edge_color)
+
+            # Add visible fin index markers on both sides:
+            # - Fin_0: none
+            # - Fin_1: 1 dot
+            # - Fin_2: 2 dots
+            # - Fin_3: 3 dots
+            if ii > 0:
+                draw_fin_index_dots(ii, 0, ii)  # outer row
+                draw_fin_index_dots(ii, 1, ii)  # inner row
         return pixels
 
     fin_atlas_img = bpy.data.images.get(fin_atlas_image_name)
