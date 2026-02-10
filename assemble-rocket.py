@@ -28,7 +28,8 @@ out_path = str(Path(out_path).expanduser().resolve())
 Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
 # Optional CLI overrides after output path:
-#   blender ... --python assemble-rocket.py -- out.glb Body.glb Fin.glb [FinGhost.glb]
+#   blender ... --python assemble-rocket.py -- out.glb [Body.glb] [Fin.glb] [FinGhost.glb] [--add-ghost-fins]
+# Flags can appear anywhere after `--` (order-insensitive).
 argv = sys.argv
 if "--" in argv:
     user_args = argv[argv.index("--") + 1 :]
@@ -36,11 +37,21 @@ else:
     user_args = []
 
 script_dir = Path(__file__).resolve().parent
-body_glb_path = Path(user_args[1]).expanduser().resolve() if len(user_args) >= 2 else (script_dir / "Body.glb")
-fin_glb_path = Path(user_args[2]).expanduser().resolve() if len(user_args) >= 3 else (script_dir / "Fin.glb")
+
+# Split args into positional args (paths) and flags.
+pos_args = []
+flags = set()
+for a in user_args:
+    if isinstance(a, str) and a.startswith("--"):
+        flags.add(a)
+    else:
+        pos_args.append(a)
+
+body_glb_path = Path(pos_args[1]).expanduser().resolve() if len(pos_args) >= 2 else (script_dir / "Body.glb")
+fin_glb_path = Path(pos_args[2]).expanduser().resolve() if len(pos_args) >= 3 else (script_dir / "Fin.glb")
 fin_ghost_glb_path = (
-    Path(user_args[3]).expanduser().resolve()
-    if len(user_args) >= 4
+    Path(pos_args[3]).expanduser().resolve()
+    if len(pos_args) >= 4
     else (script_dir / "assets" / "FinGhost.glb")
 )
 
@@ -64,9 +75,11 @@ fin_count = 4
 # The ghost fin geometry is included in the exported GLB and fully weighted to those bones.
 #
 # Option behavior:
-# - If you pass a 4th CLI arg (FinGhost.glb path), this auto-enables.
-# - Otherwise, default is disabled (set to True here to always include when the default path exists).
-use_fin_ghost = len(user_args) >= 4
+# - Pass `--add-ghost-fins` to enable explicitly.
+# - `--add-ghost-fin` is accepted as a backwards-compatible alias.
+# - Passing a 4th positional arg (FinGhost.glb path) also enables.
+use_fin_ghost = "--add-ghost-fins" in flags
+
 
 # Body import fixup (degrees). This rotation is baked into the final exported mesh.
 body_y_rotation_degrees = 0.0
