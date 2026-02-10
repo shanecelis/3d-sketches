@@ -468,6 +468,30 @@ def create_body_paint_image_with_cap(
         idx = (y * size + x) * 4
         pixels[idx : idx + 4] = list(rgba)
 
+    def draw_disc(cx, cy, r_px, rgba):
+        r2 = r_px * r_px
+        x0 = max(0, int(cx - r_px))
+        x1 = min(size - 1, int(cx + r_px))
+        y0 = max(0, int(cy - r_px))
+        y1 = min(size - 1, int(cy + r_px))
+        for yy in range(y0, y1 + 1):
+            dy = yy - cy
+            for xx in range(x0, x1 + 1):
+                dx = xx - cx
+                if dx * dx + dy * dy <= r2:
+                    set_px(xx, yy, rgba)
+
+    def draw_dots(cx, cy, dot_count: int, spacing_px: int, r_outer: int):
+        """Draw 1/2/3 dots as white ring + black center for visibility."""
+        if dot_count <= 0:
+            return
+        r_inner = max(1, int(r_outer * 0.55))
+        start_x = cx - (dot_count - 1) * spacing_px // 2
+        for k in range(dot_count):
+            x = start_x + k * spacing_px
+            draw_disc(x, cy, r_outer, (1.0, 1.0, 1.0, 1.0))
+            draw_disc(x, cy, r_inner, (0.0, 0.0, 0.0, 1.0))
+
     black = (0.0, 0.0, 0.0, 1.0)
 
     # Fill all black.
@@ -493,6 +517,8 @@ def create_body_paint_image_with_cap(
             set_px(x, y, sector_colors[sector])
 
     # Bottom cap: quadrant disc in [cap_v0..cap_v1].
+    # IMPORTANT: represent the cap as a true circle in a SQUARE sub-rect of the texture,
+    # otherwise it will be stretched into an ellipse (since the cap is only a V slice).
     cy0 = y_from_v(cap_v0)
     cy1 = y_from_v(cap_v1)
     if cy1 < cy0:
@@ -501,12 +527,15 @@ def create_body_paint_image_with_cap(
         cy1 = min(size, cy0 + 1)
 
     cap_h = max(1, cy1 - cy0)
+    # Square region for the cap disc: width == height == cap_h, centered in U.
+    cap_x0 = (size - cap_h) // 2
+    cap_x1 = min(size, cap_x0 + cap_h)
     for y in range(cy0, cy1):
         # local v in [0..1]
         lv = (y - cy0 + 0.5) / cap_h
-        for x in range(size):
-            u = (x + 0.5) / size
-            yy = (u - 0.5) * 2.0
+        for x in range(cap_x0, cap_x1):
+            u_local = (x - cap_x0 + 0.5) / cap_h
+            yy = (u_local - 0.5) * 2.0
             zz = (lv - 0.5) * 2.0
             r = math.sqrt(yy * yy + zz * zz)
             if r > 1.0:
@@ -516,6 +545,35 @@ def create_body_paint_image_with_cap(
                 ang += 2.0 * math.pi
             sector = int(ang / (math.pi / 2.0)) % 4
             set_px(x, y, sector_colors[sector])
+
+    # Add fin index markers on the bottom cap, aligned to the quadrant axes (in texture space):
+    # - Fin_1: along -X axis (left from center)
+    # - Fin_2: along -Y axis (down from center)
+    # - Fin_3: along +X axis (right from center)
+    #
+    # Dots are colinear on those axes (not a horizontal row).
+    cap_r = 0.5 * cap_h
+    r_start = 0.25 * cap_r
+    r_step = 0.18 * cap_r
+    cap_dot_r = max(2, int(cap_r * 0.12))
+
+    cx0 = cap_x0 + int(round(cap_h * 0.5))
+    cy_center = cy0 + int(round(cap_h * 0.5))
+
+    def draw_dots_along(cx, cy, dot_count: int, dir_x: int, dir_y: int):
+        for k in range(dot_count):
+            rr = r_start + k * r_step
+            x = int(round(cx + dir_x * rr))
+            y = int(round(cy + dir_y * rr))
+            draw_disc(x, y, cap_dot_r, (1.0, 1.0, 1.0, 1.0))
+            draw_disc(x, y, max(1, int(cap_dot_r * 0.55)), (0.0, 0.0, 0.0, 1.0))
+
+    # Fin_1: 1 dot on -X
+    draw_dots_along(cx0, cy_center, 1, -1, 0)
+    # Fin_2: 2 dots on -Y
+    draw_dots_along(cx0, cy_center, 2, 0, -1)
+    # Fin_3: 3 dots on +X
+    draw_dots_along(cx0, cy_center, 3, 1, 0)
 
     img.pixels = pixels
     try:
@@ -613,6 +671,32 @@ def composite_logo_into_body_paint(
     body_img.pixels = dst
 
 
+def save_image_png(img: bpy.types.Image, png_path: Path):
+    """
+    Save a Blender image to PNG, and verify the file exists on disk.
+    In some Blender/background configurations, Image.save() can silently fail to produce a file,
+    so we fall back to save_render().
+    """
+    png_path = Path(png_path).expanduser().resolve()
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+
+    img.filepath_raw = str(png_path)
+    img.file_format = "PNG"
+    try:
+        img.save()
+    except Exception as e:
+        print(f"[assemble-rocket] WARNING: Image.save() failed for {png_path}: {e}")
+
+    if not png_path.exists():
+        try:
+            img.save_render(filepath=str(png_path))
+        except Exception as e:
+            print(f"[assemble-rocket] WARNING: Image.save_render() failed for {png_path}: {e}")
+
+    if not png_path.exists():
+        print(f"[assemble-rocket] WARNING: PNG was not created on disk: {png_path}")
+
+
 def assign_body_uvs_with_bottom_cap_quadrants(
     mesh_obj,
     axis: str,
@@ -686,9 +770,16 @@ def assign_body_uvs_with_bottom_cap_quadrants(
                 else:
                     yy, zz = co_r.x, co_r.y
 
-                u = 0.5 + (yy / (2.0 * rmax))
+                # Map the cap disc into a SQUARE sub-rect of UV space:
+                # - V span is [cap_v0..cap_v1] (height = cap_s)
+                # - U span is centered with the same width cap_s (so circles stay circles)
+                cap_s = max(1e-6, cap_v1 - cap_v0)
+                cap_u0 = 0.5 - cap_s * 0.5
+
+                u_local = 0.5 + (yy / (2.0 * rmax))
                 v_local = 0.5 + (zz / (2.0 * rmax))
-                v = cap_v0 + v_local * (cap_v1 - cap_v0)
+                u = cap_u0 + u_local * cap_s
+                v = cap_v0 + v_local * cap_s
                 loop[uv_layer].uv = (max(0.0, min(1.0, u)), max(0.0, min(1.0, v)))
                 continue
 
@@ -892,6 +983,7 @@ if use_body_paint_texture:
     # Composite the logo onto the side region (not the bottom cap).
     if use_body_logo and body_logo_path.exists():
         try:
+            #print(f"[assemble-rocket] WARNING: loading rocket body image from {body_logo_path}")
             logo_img = bpy.data.images.load(filepath=str(body_logo_path), check_existing=True)
             # Place logo using side-region UVs.
             side_v_max = body_cap_v0
@@ -919,14 +1011,8 @@ if use_body_paint_texture:
     if write_body_paint_png:
         body_png = Path(out_path).with_suffix("")
         body_png = body_png.parent / f"{body_png.name}_body_paint.png"
-        body_png.parent.mkdir(parents=True, exist_ok=True)
-        body_img.filepath_raw = str(body_png)
-        body_img.file_format = "PNG"
-        try:
-            body_img.save()
-            print(f"[assemble-rocket] Wrote body paint PNG: {body_png}")
-        except Exception as e:
-            print(f"[assemble-rocket] WARNING: failed to save body paint PNG: {e}")
+        save_image_png(body_img, body_png)
+        print(f"[assemble-rocket] Wrote body paint PNG: {body_png}")
 
 fin_min, fin_max = local_aabb(fin_template)
 fin_axis_len = fin_max[ai] - fin_min[ai]
