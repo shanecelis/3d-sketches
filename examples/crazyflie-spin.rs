@@ -1,7 +1,7 @@
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 
-const SCENE: &str = "crazyflie-rigged.glb";
+const SCENE: &str = "crazyflie-rig.glb";
 
 fn main() {
     App::new()

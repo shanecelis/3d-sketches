@@ -50,6 +50,39 @@ def main():
     # previously inherited from glTF root nodes.
     imported_objs = [o for o in imported if o.name != ""]
 
+    # ------------------------------------------------------------
+    # Recenter the imported model so its combined mesh bounds are centered at the origin.
+    # This changes the exported model "anchor" (origin) in-engine.
+    # ------------------------------------------------------------
+    def world_bounds(objs):
+        pts = []
+        for obj in objs:
+            if obj.type != "MESH":
+                continue
+            for c in obj.bound_box:
+                pts.append(obj.matrix_world @ Vector(c))
+        if not pts:
+            return None
+        vmin = Vector((min(p.x for p in pts), min(p.y for p in pts), min(p.z for p in pts)))
+        vmax = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
+        return vmin, vmax
+
+    bounds = world_bounds(mesh_objs)
+    if bounds is not None:
+        vmin, vmax = bounds
+        center = (vmin + vmax) * 0.5
+
+        imported_set = set(imported_objs)
+        roots = [o for o in imported_objs if (o.parent is None or o.parent not in imported_set)]
+        for r in roots:
+            mw = r.matrix_world.copy()
+            mw.translation = mw.translation - center
+            r.matrix_world = mw
+
+        print(f"[crazyflie-rig] Recentering: moved roots by {-center}")
+    else:
+        print("[crazyflie-rig] Recentering: skipped (no mesh bounds found)")
+
     # Find propellers by name prefix
     props = sorted([o for o in mesh_objs if o.name.lower().startswith("propeller")], key=lambda o: o.name.lower())
     if not props:
@@ -57,12 +90,14 @@ def main():
 
     print(f"[crazyflie-rig] Imported meshes: {len(mesh_objs)}; propellers: {len(props)}")
 
-    # Create armature
-    bpy.ops.object.armature_add(enter_editmode=True, location=(0.0, 0.0, 0.0))
+    # Create armature (start in Object mode so we can apply transforms safely)
+    bpy.ops.object.armature_add(enter_editmode=False, location=(0.0, 0.0, 0.0))
     rig = bpy.context.object
     rig.name = "CrazyflieRig"
     arm = rig.data
     arm.name = "CrazyflieRigData"
+
+    bpy.ops.object.mode_set(mode="EDIT")
 
     # Root bone (created by armature_add)
     root = arm.edit_bones[0]
