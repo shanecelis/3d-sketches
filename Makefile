@@ -7,7 +7,7 @@ assets/%.glb: %.py | assets
 	$(BLENDER) --background --factory-startup --python $< -- $@
 
 assets/assemble-rocket-ghost.glb: assemble-rocket.py
-	$(BLENDER) --background --factory-startup --python $< -- --add-ghost-fins $@ Body.glb Fin.glb
+	$(BLENDER) --background --factory-startup --python $< -- $@ Body.glb Fin.glb --add-ghost-fins
 
 assets:
 	mkdir -p $@

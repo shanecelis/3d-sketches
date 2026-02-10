@@ -12,6 +12,7 @@ const FIN_COUNT: usize = 4;
 struct FinRig {
     fin_entities: [Option<Entity>; FIN_COUNT],
     fin_base_rotations: [Option<Quat>; FIN_COUNT],
+    fin_preferred: [bool; FIN_COUNT],
 
     ghost_entities: [Option<Entity>; FIN_COUNT],
     ghost_base_rotations: [Option<Quat>; FIN_COUNT],
@@ -42,8 +43,13 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // Camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(2.5, 0.0, 1.0).looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
-        EditorCam::default(),
+        // Transform::from_xyz(2.5, 0.0, 1.0).looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+        Transform::from_xyz(-3.5, 0.0, -2.0).looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+        EditorCam {
+            orbit_constraint: OrbitConstraint::Fixed { up: Vec3::Y, can_pass_tdc: true },
+            ..default()
+        }
+        // EditorCam::default(),
     ));
 
     // Light
@@ -70,9 +76,12 @@ fn find_fin_nodes(
         let n = name.as_str();
 
         if let Some(i) = fin_index_from_name(n) {
-            if rig.fin_entities[i].is_none() {
+            // Prefer pivot/bone-style nodes like "Root.Fin_0" over mesh nodes like "Fin_0".
+            let preferred = n.contains(".Fin_");
+            if rig.fin_entities[i].is_none() || (preferred && !rig.fin_preferred[i]) {
                 rig.fin_entities[i] = Some(entity);
                 rig.fin_base_rotations[i] = Some(transform.rotation);
+                rig.fin_preferred[i] = preferred;
                 info_once!("Found fin bone: {} ({entity:?})", n);
             }
         }

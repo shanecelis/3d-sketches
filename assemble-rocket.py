@@ -187,6 +187,54 @@ def make_image_texture_mat(name: str, image: bpy.types.Image, uv_layer_name: str
     return mat
 
 
+def make_image_texture_mat_with_alpha(
+    name: str,
+    image: bpy.types.Image,
+    uv_layer_name: str,
+    alpha: float,
+    extension: str = "CLIP",
+):
+    """
+    Image-texture material that uses the image's RGB, but forces transparency via a constant alpha.
+    (Useful for ghost fins; exported as glTF alphaMode=BLEND.)
+    """
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+
+    nt = mat.node_tree
+    nt.nodes.clear()
+
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    out.location = (520, 0)
+    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+    bsdf.location = (260, 0)
+
+    tex = nt.nodes.new("ShaderNodeTexImage")
+    tex.location = (-40, 0)
+    tex.image = image
+    tex.interpolation = "Closest"
+    tex.extension = extension
+
+    uv = nt.nodes.new("ShaderNodeUVMap")
+    uv.location = (-240, -40)
+    uv.uv_map = uv_layer_name
+
+    alpha_val = nt.nodes.new("ShaderNodeValue")
+    alpha_val.location = (80, -220)
+    alpha_val.outputs[0].default_value = float(alpha)
+
+    nt.links.new(uv.outputs["UV"], tex.inputs["Vector"])
+    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    nt.links.new(alpha_val.outputs[0], bsdf.inputs["Alpha"])
+    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+
+    mat.blend_method = "BLEND"
+    mat.shadow_method = "NONE"
+    return mat
+
+
 def assign_material(obj, mat):
     obj.data.materials.clear()
     obj.data.materials.append(mat)
@@ -352,6 +400,30 @@ def outward_dir_from_hinge(hinge: Vector, axis: str) -> Vector:
     if v.length < 1e-6:
         return Vector((0.0, 1.0, 0.0))
     return v.normalized()
+
+
+def hinge_pivot_quat(hinge_axis_world: Vector, outward_world: Vector):
+    """
+    Build a pivot orientation such that:
+    - local +Y is the hinge axis (1-DOF rotation axis)
+    - local +Z points roughly outward from the rocket body
+    This makes it easy to animate by rotating about a single local axis.
+    """
+    y = hinge_axis_world.normalized()
+    z = outward_world - y * outward_world.dot(y)
+    if z.length < 1e-6:
+        # Fallback if outward is accidentally parallel to hinge axis.
+        z = Vector((0.0, 0.0, 1.0)) if abs(y.dot(Vector((0.0, 0.0, 1.0)))) < 0.9 else Vector((0.0, 1.0, 0.0))
+        z = z - y * z.dot(y)
+    z.normalize()
+    x = y.cross(z).normalized()
+
+    # Construct a rotation matrix with columns [x y z] in world space.
+    m = Matrix.Identity(3)
+    m.col[0] = x
+    m.col[1] = y
+    m.col[2] = z
+    return m.to_quaternion()
 
 
 def axis_radial_max(mesh_obj, axis: str) -> float:
@@ -773,12 +845,6 @@ write_fin_atlas_png = True
 body = import_glb_mesh(body_glb_path, "Body")
 fin_template = import_glb_mesh(fin_glb_path, "FinTemplate")
 fin_ghost_template = None
-if use_fin_ghost:
-    if fin_ghost_glb_path.exists():
-        fin_ghost_template = import_glb_mesh(fin_ghost_glb_path, "FinGhostTemplate")
-    else:
-        print(f"[assemble-rocket] WARNING: use_fin_ghost=True but missing FinGhost GLB: {fin_ghost_glb_path}")
-        use_fin_ghost = False
 
 # Rotate the body to the desired orientation and bake it in.
 bake_object_rotation(body, (0.0, math.radians(body_y_rotation_degrees), 0.0))
@@ -1107,241 +1173,132 @@ def assign_fin_uvs_for_atlas(fin_obj, fin_index: int, local_axis: Vector, uv_lay
     bm.free()
 
 # ============================================================
-# CREATE FINS (distributed around rocket)
-# Each fin is fully weighted to its corresponding fin bone vertex group.
+# CREATE FIN PIVOTS + FIN INSTANCES (node instancing)
 #
-# Assumptions about `Fin.glb` orientation (recommended):
-# - local +X: outward direction
-# - local +Y: thickness
-# - local +Z: rocket axis / fin height
-# - origin: near the hinge/pivot (optional but helpful)
+# Goal: keep fins easy to animate via hinge pivots, and keep the body separate.
+# Note: restoring per-fin atlas colors requires per-fin UVs, which implies **one fin mesh per fin**
+# (4 total). This is still much less duplication than the old "join everything" approach.
 # ============================================================
+
+# Root node for fin pivots (matches Bevy name expectations).
+bpy.ops.object.empty_add(type="PLAIN_AXES", location=(0.0, 0.0, 0.0))
+root_node = bpy.context.object
+root_node.name = "Root"
+root_node.empty_display_size = 0.05
+
+# Parent body under Root for a clean hierarchy.
+body.parent = root_node
+body.matrix_parent_inverse = root_node.matrix_world.inverted()
+
+# Optional ghost template: one extra mesh datablock, instanced 4x.
+fin_ghost_alpha = 0.12
+if use_fin_ghost and use_fin_texture_atlas and fin_atlas_img is not None:
+    fin_ghost_template = fin_template.copy()
+    fin_ghost_template.data = fin_template.data.copy()
+    fin_ghost_template.name = "FinGhostTemplate"
+    bpy.context.scene.collection.objects.link(fin_ghost_template)
+
+    ghost_mat = make_image_texture_mat_with_alpha("Mat_Fin_Atlas_Ghost", fin_atlas_img, fin_uv_layer, alpha=fin_ghost_alpha, extension="CLIP")
+    assign_material(fin_ghost_template, ghost_mat)
+    ensure_uv_layer(fin_ghost_template.data, fin_uv_layer)
+    assign_fin_uvs_for_atlas(fin_ghost_template, 0, fin_side_axis, fin_uv_layer, align_threshold=fin_side_align_threshold)
+
+# Build fin pivot empties + instanced fin meshes.
+export_objs = [root_node, body]
 fins = []
 ghost_fins = []
+
 for i in range(fin_count):
     angle = (2 * math.pi / fin_count) * i
+    axis_vec = {"X": Vector((1.0, 0.0, 0.0)), "Y": Vector((0.0, 1.0, 0.0)), "Z": Vector((0.0, 0.0, 1.0))}[spin_axis]
+    rot_i = Matrix.Rotation(angle, 4, axis_vec)
+
+    # Hinge pivot position and outward axis (same math as old bone placement).
+    hinge = rot_i @ hinge_base.copy()
+    outward = outward_dir_from_hinge(hinge, rocket_axis)
+
+    # Real fin pivot node: Name matches Bevy's fin lookup ("Root.Fin_i").
+    bpy.ops.object.empty_add(type="PLAIN_AXES", location=hinge)
+    pivot = bpy.context.object
+    pivot.name = f"Root.Fin_{i}"
+    pivot.empty_display_size = 0.03
+    pivot.parent = root_node
+    pivot.matrix_parent_inverse = root_node.matrix_world.inverted()
+    # Orient the pivot so animating a single axis behaves like a hinge.
+    pivot.rotation_mode = "QUATERNION"
+    pivot.rotation_quaternion = hinge_pivot_quat(axis_vec, outward)
+
+    # Fin instance: per-fin mesh data so each fin can have its own atlas UVs / colors.
     fin = fin_template.copy()
     fin.data = fin_template.data.copy()
-    fin.name = f"FinObj_{i}"
+    fin.name = f"Fin_{i}"
     bpy.context.scene.collection.objects.link(fin)
 
-    # Color the fin sides.
-    # Convention: fin "sides" are the two broad faces whose normals align with ±fin_side_axis.
-    if use_fin_texture_atlas:
+    if use_fin_texture_atlas and fin_atlas_mat is not None:
         assign_material(fin, fin_atlas_mat)
         ensure_uv_layer(fin.data, fin_uv_layer)
         assign_fin_uvs_for_atlas(fin, i, fin_side_axis, fin_uv_layer, align_threshold=fin_side_align_threshold)
-    elif use_vertex_colors_for_fin_sides:
-        # Use a single material so vertex colors show "as-is" in most engines.
-        assign_material(fin, make_vertex_color_mat("Mat_Fin_VCol", fin_vertex_color_layer))
-        paint_fin_sides_vertex_colors(
-            fin,
-            fin_side_axis,
-            fin_outer_colors[i],
-            fin_inner_colors[i],
-            fin_edge_color,
-            layer_name=fin_vertex_color_layer,
-        )
-    else:
-        # Material-based split (older approach).
-        mat_fin_outer = make_mat(f"Mat_Fin{i}_Outer", fin_outer_colors[i])
-        mat_fin_inner = make_mat(f"Mat_Fin{i}_Inner", fin_inner_colors[i])
-        assign_fin_two_sided_materials(
-            fin,
-            Vector((0.0, 1.0, 0.0)),
-            mat_fin_outer,
-            mat_fin_inner,
-            mat_fin_edge,
-        )
 
     if place_fins_from_template:
-        # Fin.glb is already placed correctly; just duplicate and spin copies around the rocket axis
-        # *in world space* so any imported offset from the axis is preserved.
-        fin.matrix_world = Matrix.Rotation(angle, 4, spin_axis) @ fin_template.matrix_world
-
-        bpy.ops.object.select_all(action="DESELECT")
-        fin.select_set(True)
-        bpy.context.view_layer.objects.active = fin
-        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+        fin.matrix_world = rot_i @ fin_template.matrix_world
     else:
         # Legacy placement mode (kept for reference / future use).
         fin_axis = body_axis_min + fin_axis_offset_m
+        fin.matrix_world = fin_template.matrix_world.copy()
         if rocket_axis.upper() == "X":
-            fin.location.x = fin_axis
+            fin.matrix_world.translation.x = fin_axis
         elif rocket_axis.upper() == "Y":
-            fin.location.y = fin_axis
+            fin.matrix_world.translation.y = fin_axis
         else:
-            fin.location.z = fin_axis
+            fin.matrix_world.translation.z = fin_axis
 
-        bpy.ops.object.select_all(action="DESELECT")
-        fin.select_set(True)
-        bpy.context.view_layer.objects.active = fin
-        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    # Parent under pivot, preserving world transform (so pivot drives fin motion in-engine).
+    bpy.ops.object.select_all(action="DESELECT")
+    fin.select_set(True)
+    pivot.select_set(True)
+    bpy.context.view_layer.objects.active = pivot
+    bpy.ops.object.parent_set(type="OBJECT", keep_transform=True)
 
-    # Match the bone name we create below (so skinning works in glTF).
-    weight_all_verts(fin, f"Root.Fin_{i}", 1.0)
+    export_objs.extend([pivot, fin])
     fins.append(fin)
 
+    # Ghost fin pivot + instance (optional).
     if use_fin_ghost and fin_ghost_template is not None:
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=hinge)
+        gpivot = bpy.context.object
+        gpivot.name = f"FinGhost_{i}"
+        gpivot.empty_display_size = 0.03
+        gpivot.parent = root_node
+        gpivot.matrix_parent_inverse = root_node.matrix_world.inverted()
+        # Same hinge orientation for ghost pivot.
+        gpivot.rotation_mode = "QUATERNION"
+        gpivot.rotation_quaternion = hinge_pivot_quat(axis_vec, outward)
+
         g = fin_ghost_template.copy()
-        g.data = fin_ghost_template.data.copy()
-        g.name = f"FinGhostObj_{i}"
+        g.data = fin_ghost_template.data  # shared ghost mesh data!
+        g.name = f"FinGhostMesh_{i}"
         bpy.context.scene.collection.objects.link(g)
-
-        if place_fins_from_template:
-            g.matrix_world = Matrix.Rotation(angle, 4, spin_axis) @ fin_ghost_template.matrix_world
-
-            bpy.ops.object.select_all(action="DESELECT")
-            g.select_set(True)
-            bpy.context.view_layer.objects.active = g
-            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-        else:
-            fin_axis = body_axis_min + fin_axis_offset_m
-            if rocket_axis.upper() == "X":
-                g.location.x = fin_axis
-            elif rocket_axis.upper() == "Y":
-                g.location.y = fin_axis
-            else:
-                g.location.z = fin_axis
-
-            bpy.ops.object.select_all(action="DESELECT")
-            g.select_set(True)
-            bpy.context.view_layer.objects.active = g
-            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-
-        # Ghost joints are named FinGhost_<i> (no Root prefix).
-        weight_all_verts(g, f"FinGhost_{i}", 1.0)
-        ghost_fins.append(g)
-
-# ============================================================
-# JOIN INTO ONE MESH
-# ============================================================
-for obj in [body] + fins + ghost_fins:
-    obj.select_set(True)
-bpy.context.view_layer.objects.active = body
-bpy.ops.object.join()
-
-rocket = bpy.context.object
-rocket.name = "Rocket"
-bpy.ops.object.shade_smooth()
-
-# ============================================================
-# CREATE ARMATURE / RIG
-# ============================================================
-bpy.ops.object.armature_add(enter_editmode=True, location=(0, 0, 0))
-rig = bpy.context.object
-rig.name = "RocketRig"
-arm = rig.data
-arm.name = "RocketRigData"
-
-# Root bone
-root_bone = arm.edit_bones[0]
-root_bone.name = "Root"
-if rocket_axis.upper() == "X":
-    root_bone.head = (body_axis_min, 0, 0)
-    root_bone.tail = (body_axis_max, 0, 0)
-elif rocket_axis.upper() == "Y":
-    root_bone.head = (0, body_axis_min, 0)
-    root_bone.tail = (0, body_axis_max, 0)
-else:
-    root_bone.head = (0, 0, body_axis_min)
-    root_bone.tail = (0, 0, body_axis_max)
-
-# Fin bones: hinge at (near) fin base, tail outward
-for i in range(fin_count):
-    angle = (2 * math.pi / fin_count) * i
-
-    # Fin.glb provides the base fin placement. We estimate the hinge from fin geometry,
-    # then rotate that hinge point around the rocket axis for each fin.
-    hinge = hinge_base.copy()
-    hinge = Matrix.Rotation(angle, 4, spin_axis) @ hinge
-
-    outward = outward_dir_from_hinge(hinge, rocket_axis)
-
-    # Name bones to match the requested convention in-engine.
-    b = arm.edit_bones.new(f"Root.Fin_{i}")
-    b.head = hinge
-    b.tail = hinge + outward * (radial_span * 0.6)
-    b.parent = root_bone
-    b.use_connect = False
-
-    if use_fin_ghost:
-        gb = arm.edit_bones.new(f"FinGhost_{i}")
-        gb.head = hinge
-        gb.tail = hinge + outward * (radial_span * 0.6)
-        gb.parent = root_bone
-        gb.use_connect = False
-
-bpy.ops.object.mode_set(mode="OBJECT")
-
-# Bind mesh to armature (skinning)
-mod = rocket.modifiers.new(name="Armature", type="ARMATURE")
-mod.object = rig
-mod.use_vertex_groups = True
-rocket.parent = rig
-
-# Make rotation editing predictable (not required for export, but nice)
-bpy.context.view_layer.objects.active = rig
-bpy.ops.object.mode_set(mode="POSE")
-for pb in rig.pose.bones:
-    pb.rotation_mode = "XYZ"
-bpy.ops.object.mode_set(mode="OBJECT")
-
-# ============================================================
-# BAKE A GLOBAL ROTATION (so engines don't need to rotate it)
-# Rotate the whole model +90° around Y and APPLY the transform.
-# ============================================================
-def bake_global_y_rotation(mesh_obj, armature_obj, angle_degrees: float):
-    """
-    Bake a world-space rotation into both the mesh object data and the armature,
-    while preserving skinning/parenting.
-    """
-    angle = math.radians(angle_degrees)
-    rot = Matrix.Rotation(angle, 4, "Y")
-
-    # Ensure we're in OBJECT mode.
-    if bpy.context.mode != "OBJECT":
-        bpy.ops.object.mode_set(mode="OBJECT")
-
-    # Temporarily unparent the mesh so applying transforms on the armature doesn't
-    # implicitly compensate the child and cancel out the intended bake.
-    bpy.ops.object.select_all(action="DESELECT")
-    mesh_obj.select_set(True)
-    bpy.context.view_layer.objects.active = mesh_obj
-    if mesh_obj.parent is not None:
-        bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
-
-    # Rotate both objects in world space.
-    mesh_obj.matrix_world = rot @ mesh_obj.matrix_world
-    armature_obj.matrix_world = rot @ armature_obj.matrix_world
-
-    # Apply rotation to bake into data.
-    for obj in (mesh_obj, armature_obj):
+        g.matrix_world = rot_i @ fin_ghost_template.matrix_world
         bpy.ops.object.select_all(action="DESELECT")
-        obj.select_set(True)
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+        g.select_set(True)
+        gpivot.select_set(True)
+        bpy.context.view_layer.objects.active = gpivot
+        bpy.ops.object.parent_set(type="OBJECT", keep_transform=True)
 
-    # Re-parent mesh back to armature, preserving world transform.
-    mesh_obj.parent = armature_obj
-    mesh_obj.matrix_parent_inverse = armature_obj.matrix_world.inverted()
-
-
-# Rotate the exported rocket so it faces the desired direction in-engine.
-bake_global_y_rotation(rocket, rig, 180.0)
+        export_objs.extend([gpivot, g])
+        ghost_fins.append(g)
 
 # ============================================================
 # EXPORT GLB
 # ============================================================
-# Select only our objects for export
 bpy.ops.object.select_all(action="DESELECT")
-rocket.select_set(True)
-rig.select_set(True)
-bpy.context.view_layer.objects.active = rocket
+for obj in export_objs:
+    try:
+        obj.select_set(True)
+    except Exception:
+        pass
+bpy.context.view_layer.objects.active = body
 
-# Export options:
-# - export_skins=True ensures the rig/weights go out
-# - export_animations=False (no clips created here; you can animate in your engine)
 bpy.ops.export_scene.gltf(
     filepath=out_path,
     export_format="GLB",
@@ -1349,16 +1306,8 @@ bpy.ops.export_scene.gltf(
     export_yup=True,
     export_apply=False,
     export_colors=True,
-    export_skins=True,
+    export_skins=False,
     export_animations=False,
-    # Mesh compression (Draco). Requires runtime support in your engine.
-    # export_draco_mesh_compression_enable=True,
-    # export_draco_mesh_compression_level=6,
-    # export_draco_position_quantization=14,
-    # export_draco_normal_quantization=10,
-    # export_draco_texcoord_quantization=12,
-    # export_draco_color_quantization=10,
-    # export_draco_generic_quantization=12,
 )
 
 print(f"Exported: {out_path}")
