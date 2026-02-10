@@ -3,14 +3,21 @@ use bevy::prelude::*;
 use bevy_editor_cam::prelude::*;
 
 // const ROCKET_GLB: &str = "blender-rocket.glb";
-const ROCKET_GLB: &str = "assemble-rocket.glb";
+// const ROCKET_GLB: &str = "assemble-rocket.glb";
+const ROCKET_GLB: &str = "assemble-rocket-ghost.glb";
 // const ROCKET_GLB: &str = "elodin-rocket.glb";
 const FIN_COUNT: usize = 4;
 
 #[derive(Resource, Default)]
-struct FinBones {
-    entities: [Option<Entity>; FIN_COUNT],
-    base_rotations: [Option<Quat>; FIN_COUNT],
+struct FinRig {
+    fin_entities: [Option<Entity>; FIN_COUNT],
+    fin_base_rotations: [Option<Quat>; FIN_COUNT],
+
+    ghost_entities: [Option<Entity>; FIN_COUNT],
+    ghost_base_rotations: [Option<Quat>; FIN_COUNT],
+
+    // Per-fin state for lagging the physical fins toward the commanded angle.
+    fin_angle: [f32; FIN_COUNT],
 }
 
 fn main() {
@@ -25,9 +32,9 @@ fn main() {
             }),
         )
         .add_plugins(DefaultEditorCamPlugins)
-        .init_resource::<FinBones>()
+        .init_resource::<FinRig>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (find_fin_bones, animate_fins))
+        .add_systems(Update, (find_fin_nodes, animate_fins))
         .run();
 }
 
@@ -35,7 +42,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // Camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 1.5, 1.5).looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+        Transform::from_xyz(2.5, 0.0, 1.0).looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
         EditorCam::default(),
     ));
 
@@ -55,24 +62,28 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((Name::new("Rocket"), SceneRoot(rocket_scene)));
 }
 
-fn find_fin_bones(
-    mut fins: ResMut<FinBones>,
+fn find_fin_nodes(
+    mut rig: ResMut<FinRig>,
     named_transforms: Query<(Entity, &Name, &Transform)>,
 ) {
-    if fins.entities.iter().all(|e| e.is_some()) {
-        return;
-    }
-
     for (entity, name, transform) in &named_transforms {
-        let Some(i) = fin_index_from_name(name.as_str()) else {
-            continue;
-        };
-        if fins.entities[i].is_some() {
-            continue;
+        let n = name.as_str();
+
+        if let Some(i) = fin_index_from_name(n) {
+            if rig.fin_entities[i].is_none() {
+                rig.fin_entities[i] = Some(entity);
+                rig.fin_base_rotations[i] = Some(transform.rotation);
+                info_once!("Found fin bone: {} ({entity:?})", n);
+            }
         }
-        fins.entities[i] = Some(entity);
-        fins.base_rotations[i] = Some(transform.rotation);
-        info_once!("Found fin bone: {} ({entity:?})", name.as_str());
+
+        if let Some(i) = ghost_index_from_name(n) {
+            if rig.ghost_entities[i].is_none() {
+                rig.ghost_entities[i] = Some(entity);
+                rig.ghost_base_rotations[i] = Some(transform.rotation);
+                info_once!("Found fin ghost bone: {} ({entity:?})", n);
+            }
+        }
     }
 }
 
@@ -86,22 +97,51 @@ fn fin_index_from_name(name: &str) -> Option<usize> {
     if idx < FIN_COUNT { Some(idx) } else { None }
 }
 
-fn animate_fins(time: Res<Time>, fins: Res<FinBones>, mut transforms: Query<&mut Transform>) {
-    // Simple "wave" motion. If the axis is wrong for your model, swap Z for X/Y.
+fn ghost_index_from_name(name: &str) -> Option<usize> {
+    // Accept exactly "FinGhost_0".."FinGhost_3" (and also allow "<prefix>.FinGhost_0").
+    let (prefix, idx_str) = name.rsplit_once("FinGhost_")?;
+    if !(prefix.is_empty() || prefix.ends_with('.')) {
+        return None;
+    }
+    let idx: usize = idx_str.parse().ok()?;
+    if idx < FIN_COUNT { Some(idx) } else { None }
+}
+
+fn animate_fins(time: Res<Time>, mut rig: ResMut<FinRig>, mut transforms: Query<&mut Transform>) {
+    // Commanded ("ghost") wave motion. Physical fins lag behind via a simple 1st-order response.
     let t = time.elapsed_secs();
+    let dt = time.delta_secs();
     let amplitude = 0.6;
     let speed = 1.6;
     let phase_step = std::f32::consts::TAU / FIN_COUNT as f32;
 
     for i in 0..FIN_COUNT {
-        let (Some(entity), Some(base_rotation)) = (fins.entities[i], fins.base_rotations[i]) else {
-            continue;
-        };
-        let Ok(mut fin_transform) = transforms.get_mut(entity) else {
-            continue;
+        let commanded = amplitude * (t * speed + i as f32 * phase_step).sin();
+
+        // If ghost bones exist, animate them directly as the commanded target.
+        if let (Some(e), Some(base)) = (rig.ghost_entities[i], rig.ghost_base_rotations[i]) {
+            if let Ok(mut tr) = transforms.get_mut(e) {
+                tr.rotation = base * Quat::from_rotation_y(commanded);
+            }
+        }
+
+        // Physical fin: if ghost exists, lag toward commanded; otherwise just use commanded.
+        let target = if rig.ghost_entities[i].is_some() {
+            commanded
+        } else {
+            commanded
         };
 
-        let angle = amplitude * (t * speed + i as f32 * phase_step).sin();
-        fin_transform.rotation = base_rotation * Quat::from_rotation_y(angle);
+        // First-order lag: dθ/dt = (target-θ)/tau
+        // tau controls how "sluggish" the fin is.
+        let tau = 0.48_f32;
+        let alpha = if tau > 0.0 { (dt / tau).min(1.0) } else { 1.0 };
+        rig.fin_angle[i] = rig.fin_angle[i] + (target - rig.fin_angle[i]) * alpha;
+
+        if let (Some(e), Some(base)) = (rig.fin_entities[i], rig.fin_base_rotations[i]) {
+            if let Ok(mut tr) = transforms.get_mut(e) {
+                tr.rotation = base * Quat::from_rotation_y(rig.fin_angle[i]);
+            }
+        }
     }
 }

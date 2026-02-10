@@ -28,7 +28,7 @@ out_path = str(Path(out_path).expanduser().resolve())
 Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
 # Optional CLI overrides after output path:
-#   blender ... --python assemble-rocket.py -- out.glb Body.glb Fin.glb
+#   blender ... --python assemble-rocket.py -- out.glb Body.glb Fin.glb [FinGhost.glb]
 argv = sys.argv
 if "--" in argv:
     user_args = argv[argv.index("--") + 1 :]
@@ -38,6 +38,11 @@ else:
 script_dir = Path(__file__).resolve().parent
 body_glb_path = Path(user_args[1]).expanduser().resolve() if len(user_args) >= 2 else (script_dir / "Body.glb")
 fin_glb_path = Path(user_args[2]).expanduser().resolve() if len(user_args) >= 3 else (script_dir / "Fin.glb")
+fin_ghost_glb_path = (
+    Path(user_args[3]).expanduser().resolve()
+    if len(user_args) >= 4
+    else (script_dir / "assets" / "FinGhost.glb")
+)
 
 # ============================================================
 # CLEAN SCENE
@@ -54,6 +59,14 @@ scene.unit_settings.system = "METRIC"
 # PARAMETERS
 # ============================================================
 fin_count = 4
+
+# If true, also import FinGhost.glb and add additional joints named FinGhost_0..FinGhost_3.
+# The ghost fin geometry is included in the exported GLB and fully weighted to those bones.
+#
+# Option behavior:
+# - If you pass a 4th CLI arg (FinGhost.glb path), this auto-enables.
+# - Otherwise, default is disabled (set to True here to always include when the default path exists).
+use_fin_ghost = len(user_args) >= 4
 
 # Body import fixup (degrees). This rotation is baked into the final exported mesh.
 body_y_rotation_degrees = 0.0
@@ -746,6 +759,13 @@ write_fin_atlas_png = True
 # ============================================================
 body = import_glb_mesh(body_glb_path, "Body")
 fin_template = import_glb_mesh(fin_glb_path, "FinTemplate")
+fin_ghost_template = None
+if use_fin_ghost:
+    if fin_ghost_glb_path.exists():
+        fin_ghost_template = import_glb_mesh(fin_ghost_glb_path, "FinGhostTemplate")
+    else:
+        print(f"[assemble-rocket] WARNING: use_fin_ghost=True but missing FinGhost GLB: {fin_ghost_glb_path}")
+        use_fin_ghost = False
 
 # Rotate the body to the desired orientation and bake it in.
 bake_object_rotation(body, (0.0, math.radians(body_y_rotation_degrees), 0.0))
@@ -1084,6 +1104,7 @@ def assign_fin_uvs_for_atlas(fin_obj, fin_index: int, local_axis: Vector, uv_lay
 # - origin: near the hinge/pivot (optional but helpful)
 # ============================================================
 fins = []
+ghost_fins = []
 for i in range(fin_count):
     angle = (2 * math.pi / fin_count) * i
     fin = fin_template.copy()
@@ -1148,10 +1169,41 @@ for i in range(fin_count):
     weight_all_verts(fin, f"Root.Fin_{i}", 1.0)
     fins.append(fin)
 
+    if use_fin_ghost and fin_ghost_template is not None:
+        g = fin_ghost_template.copy()
+        g.data = fin_ghost_template.data.copy()
+        g.name = f"FinGhostObj_{i}"
+        bpy.context.scene.collection.objects.link(g)
+
+        if place_fins_from_template:
+            g.matrix_world = Matrix.Rotation(angle, 4, spin_axis) @ fin_ghost_template.matrix_world
+
+            bpy.ops.object.select_all(action="DESELECT")
+            g.select_set(True)
+            bpy.context.view_layer.objects.active = g
+            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+        else:
+            fin_axis = body_axis_min + fin_axis_offset_m
+            if rocket_axis.upper() == "X":
+                g.location.x = fin_axis
+            elif rocket_axis.upper() == "Y":
+                g.location.y = fin_axis
+            else:
+                g.location.z = fin_axis
+
+            bpy.ops.object.select_all(action="DESELECT")
+            g.select_set(True)
+            bpy.context.view_layer.objects.active = g
+            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+
+        # Ghost joints are named FinGhost_<i> (no Root prefix).
+        weight_all_verts(g, f"FinGhost_{i}", 1.0)
+        ghost_fins.append(g)
+
 # ============================================================
 # JOIN INTO ONE MESH
 # ============================================================
-for obj in [body] + fins:
+for obj in [body] + fins + ghost_fins:
     obj.select_set(True)
 bpy.context.view_layer.objects.active = body
 bpy.ops.object.join()
@@ -1199,6 +1251,13 @@ for i in range(fin_count):
     b.tail = hinge + outward * (radial_span * 0.6)
     b.parent = root_bone
     b.use_connect = False
+
+    if use_fin_ghost:
+        gb = arm.edit_bones.new(f"FinGhost_{i}")
+        gb.head = hinge
+        gb.tail = hinge + outward * (radial_span * 0.6)
+        gb.parent = root_bone
+        gb.use_connect = False
 
 bpy.ops.object.mode_set(mode="OBJECT")
 
