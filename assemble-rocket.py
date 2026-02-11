@@ -443,6 +443,102 @@ def ensure_uv_layer(mesh: bpy.types.Mesh, uv_name: str):
     return uv
 
 
+def draw_disc(pixels: list, size: int, cx: float, cy: float, r_px: float, rgba):
+    """
+    Draw a filled circle into a flat RGBA float pixel buffer (row-major, size x size).
+    Use for marker dots etc.; replace with other shapes as needed.
+    """
+    r2 = r_px * r_px
+    x0 = max(0, int(cx - r_px))
+    x1 = min(size - 1, int(cx + r_px))
+    y0 = max(0, int(cy - r_px))
+    y1 = min(size - 1, int(cy + r_px))
+    for yy in range(y0, y1 + 1):
+        dy = yy - cy
+        for xx in range(x0, x1 + 1):
+            dx = xx - cx
+            if dx * dx + dy * dy <= r2:
+                idx = (yy * size + xx) * 4
+                pixels[idx : idx + 4] = list(rgba)
+
+
+def draw_line(
+    pixels: list,
+    size: int,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    rgba,
+    width: int = 1,
+):
+    """
+    Draw a line into a flat RGBA float pixel buffer (row-major, size x size).
+    Uses Bresenham's line algorithm; coordinates are clipped to image bounds.
+    width: line thickness in pixels (default 1); drawn by offsetting along the perpendicular.
+    """
+    if width <= 1:
+        _draw_line_1px(pixels, size, x0, y0, x1, y1, rgba)
+        return
+    # Thick line: unit perpendicular offset, then draw multiple 1-pixel lines.
+    dx = x1 - x0
+    dy = y1 - y0
+    length = math.sqrt(dx * dx + dy * dy)
+    if length < 1e-9:
+        _draw_line_1px(pixels, size, x0, y0, x1, y1, rgba)
+        return
+    px = -dy / length
+    py = dx / length
+    half = (width - 1) / 2.0
+    for k in range(width):
+        offset = (k - half) * 1.0
+        _draw_line_1px(
+            pixels, size,
+            x0 + px * offset, y0 + py * offset,
+            x1 + px * offset, y1 + py * offset,
+            rgba,
+        )
+
+
+def _draw_line_1px(pixels: list, size: int, x0: float, y0: float, x1: float, y1: float, rgba):
+    """Bresenham 1-pixel line; used by draw_line."""
+    ix0, iy0 = int(round(x0)), int(round(y0))
+    ix1, iy1 = int(round(x1)), int(round(y1))
+    dx = abs(ix1 - ix0)
+    dy = -abs(iy1 - iy0)
+    sx = 1 if ix0 < ix1 else -1
+    sy = 1 if iy0 < iy1 else -1
+    err = dx + dy
+    rgba_list = list(rgba)
+    while True:
+        if 0 <= ix0 < size and 0 <= iy0 < size:
+            idx = (iy0 * size + ix0) * 4
+            pixels[idx : idx + 4] = rgba_list
+        if ix0 == ix1 and iy0 == iy1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            ix0 += sx
+        if e2 <= dx:
+            err += dx
+            iy0 += sy
+
+
+def draw_line_marker(pixels: list, size: int, cx: float, cy: float, r_px: float, rgba):
+    """
+    Draw a line-based marker with the same signature as draw_disc (pixels, size, cx, cy, r_px, rgba).
+    Draws a plus/cross centered at (cx, cy) with arms of length r_px.
+    """
+    # draw_line(pixels, size, cx - r_px, cy, cx + r_px, cy, rgba, 3)
+    draw_line(pixels, size, cx, cy - r_px, cx, cy + r_px, rgba, 5)
+
+
+# Default marker used by body paint and fin atlas; set to draw_line_marker to use cross markers.
+draw_marker = draw_disc
+# draw_marker = draw_line_marker
+
+
 def create_body_paint_image_with_cap(
     name: str,
     size: int,
@@ -470,19 +566,6 @@ def create_body_paint_image_with_cap(
         idx = (y * size + x) * 4
         pixels[idx : idx + 4] = list(rgba)
 
-    def draw_disc(cx, cy, r_px, rgba):
-        r2 = r_px * r_px
-        x0 = max(0, int(cx - r_px))
-        x1 = min(size - 1, int(cx + r_px))
-        y0 = max(0, int(cy - r_px))
-        y1 = min(size - 1, int(cy + r_px))
-        for yy in range(y0, y1 + 1):
-            dy = yy - cy
-            for xx in range(x0, x1 + 1):
-                dx = xx - cx
-                if dx * dx + dy * dy <= r2:
-                    set_px(xx, yy, rgba)
-
     def draw_dots(cx, cy, dot_count: int, spacing_px: int, r_outer: int):
         """Draw 1/2/3 dots as white ring + black center for visibility."""
         if dot_count <= 0:
@@ -491,8 +574,7 @@ def create_body_paint_image_with_cap(
         start_x = cx - (dot_count - 1) * spacing_px // 2
         for k in range(dot_count):
             x = start_x + k * spacing_px
-            # draw_disc(x, cy, r_outer, (1.0, 1.0, 1.0, 1.0))
-            draw_disc(x, cy, r_inner, (0.0, 0.0, 0.0, 1.0))
+            draw_marker(pixels, size, x, cy, r_inner, (0.0, 0.0, 0.0, 1.0))
 
     black = (0.0, 0.0, 0.0, 1.0)
 
@@ -569,8 +651,7 @@ def create_body_paint_image_with_cap(
             rr = r_start - k * r_step
             x = int(round(cx + dir_x * rr))
             y = int(round(cy + dir_y * rr))
-            #draw_disc(x, y, cap_dot_r, (1.0, 1.0, 1.0, 1.0))
-            draw_disc(x, y, max(1, int(cap_dot_r * 0.55)), (0.0, 0.0, 0.0, 1.0))
+            draw_marker(pixels, size, x, y, max(1, int(cap_dot_r * 0.55)), (0.0, 0.0, 0.0, 1.0))
 
     # Fin_1: 1 dot on -X
     draw_dots_along(cx0, cy_center, 1, -1, 0)
@@ -1096,19 +1177,6 @@ if use_fin_texture_atlas:
                 for xx in range(x0, min(x0 + tile_w, size)):
                     set_px(xx, yy, rgba)
 
-        def draw_disc(cx, cy, r_px, rgba):
-            r2 = r_px * r_px
-            x0 = max(0, int(cx - r_px))
-            x1 = min(size - 1, int(cx + r_px))
-            y0 = max(0, int(cy - r_px))
-            y1 = min(size - 1, int(cy + r_px))
-            for yy in range(y0, y1 + 1):
-                dy = yy - cy
-                for xx in range(x0, x1 + 1):
-                    dx = xx - cx
-                    if dx * dx + dy * dy <= r2:
-                        set_px(xx, yy, rgba)
-
         def draw_fin_index_dots(col, row, dot_count: int):
             """
             Draw 1/2/3 dots in a tile to label Fin_1/2/3.
@@ -1126,13 +1194,9 @@ if use_fin_texture_atlas:
             r_inner = max(1, int(r_outer * 0.55))
 
             for k in range(dot_count):
-                # cx = x0 + margin_x + k * spacing
                 cx = x0 + spacing - 0 * dot_count * spacing / 4 + k * spacing
-                # cy = y0 + tile_h - margin_y  # remember: y=0 is bottom
-                cy = y0 + tile_h /2  # remember: y=0 is bottom
-                # draw_disc(cx, cy, r_outer, (1.0, 1.0, 1.0, 1.0)) # white dot
-                # draw_disc(cx, cy, r_inner, (0.0, 0.0, 0.0, 1.0)) # black dot
-                draw_disc(cx, cy, r_outer, (0.0, 0.0, 0.0, 1.0)) # black dot
+                cy = y0 + tile_h / 2
+                draw_marker(pixels, size, cx, cy, r_outer, (0.0, 0.0, 0.0, 1.0))
 
         for ii in range(4):
             fill_tile(ii, 0, outer_colors[ii])
