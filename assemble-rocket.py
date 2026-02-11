@@ -101,6 +101,11 @@ fin_anchor_t = 0.65
 INCH_TO_M = 0.0254
 fin_axis_offset_m = 2.0 * INCH_TO_M
 
+# Move the rocket so the base is at the origin, then apply that translation into the hierarchy.
+# Set to the distance along rocket_axis to shift (e.g. 0.15 if the base is at -0.15).
+# The offset is applied and baked so the root stays at (0,0,0) in the export.
+children_offset_along_axis = 1.2
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -324,6 +329,19 @@ def bake_object_rotation(obj, rotation_euler_xyz):
 
     obj.rotation_euler = rotation_euler_xyz
     bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+
+
+def bake_object_translation(obj, translation_xyz):
+    """Set an object's location and bake it (into mesh data / children)."""
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+
+    obj.location = translation_xyz
+    bpy.ops.object.transform_apply(location=True, rotation=False, scale=False)
 
 
 def local_aabb(obj):
@@ -1510,6 +1528,16 @@ for i in range(fin_count):
 
         export_objs.extend([gpivot, g])
         ghost_fins.append(g)
+
+# ============================================================
+# ANCHOR AT BASE: translate all Root children by same amount and apply
+# ============================================================
+if children_offset_along_axis != 0.0:
+    ai = axis_index(rocket_axis)
+    for child in list(root_node.children):
+        trans = child.location.copy()
+        trans[ai] += children_offset_along_axis
+        bake_object_translation(child, trans)
 
 # ============================================================
 # EXPORT GLB
