@@ -555,7 +555,7 @@ def create_body_paint_image_with_cap(
     #
     # Dots are colinear on those axes (not a horizontal row).
     cap_r = 0.5 * cap_h
-    r_start = 0.15 * cap_r
+    r_start = 0.90 * cap_r
     r_step = 0.18 * cap_r
     cap_dot_r = max(2, int(cap_r * 0.12))
 
@@ -564,7 +564,9 @@ def create_body_paint_image_with_cap(
 
     def draw_dots_along(cx, cy, dot_count: int, dir_x: int, dir_y: int):
         for k in range(dot_count):
-            rr = r_start + k * r_step
+            if k >= 2:
+                k += 1
+            rr = r_start - k * r_step
             x = int(round(cx + dir_x * rr))
             y = int(round(cy + dir_y * rr))
             #draw_disc(x, y, cap_dot_r, (1.0, 1.0, 1.0, 1.0))
@@ -708,12 +710,14 @@ def assign_body_uvs_with_bottom_cap_quadrants(
     cap_v0: float,
     cap_v1: float,
     cap_rotation_degrees: float = 0.0,
+    cap_uv_zoom_out: float = 1.0,
 ):
     """
     Assign UVs for the body:
     - side faces: cylindrical projection (U=angle, V=axis) mapped into v in [0..side_v_max]
     - bottom cap (negative axis normal): planar projection into cap region [cap_v0..cap_v1]
     - top cap: constant UV (black)
+    - cap_uv_zoom_out: scale cap UVs so rim maps further toward circle edge (>1 = zoom out, less pixelation)
     """
     axis = axis.upper()
     if bpy.context.mode != "OBJECT":
@@ -745,11 +749,27 @@ def assign_body_uvs_with_bottom_cap_quadrants(
     alen = max(1e-6, amax - amin)
     rmax = max(1e-6, rmax)
 
+    # Use the bottom cap's actual radial extent so the cap rim maps to the circle edge
+    # (otherwise rmax from the whole mesh can be larger than the cap, causing "zoomed in" UVs).
+    cap_threshold = 0.9
+    cap_rmax = 1e-6
+    for f in bm.faces:
+        if f.normal.dot(axis_vec) <= -cap_threshold:
+            for v in f.verts:
+                if axis == "X":
+                    r = math.sqrt(v.co.y * v.co.y + v.co.z * v.co.z)
+                elif axis == "Y":
+                    r = math.sqrt(v.co.x * v.co.x + v.co.z * v.co.z)
+                else:
+                    r = math.sqrt(v.co.x * v.co.x + v.co.y * v.co.y)
+                cap_rmax = max(cap_rmax, r)
+    if cap_rmax <= 1e-6:
+        cap_rmax = rmax
+
     two_pi = 2.0 * math.pi
     u_offset = (u_offset_degrees / 360.0) % 1.0
     cap_rot = Matrix.Rotation(math.radians(u_offset_degrees + cap_rotation_degrees), 4, axis)
 
-    cap_threshold = 0.9
     for f in bm.faces:
         nd = f.normal.dot(axis_vec)
         is_bottom_cap = nd <= -cap_threshold
@@ -775,11 +795,12 @@ def assign_body_uvs_with_bottom_cap_quadrants(
                 # Map the cap disc into a SQUARE sub-rect of UV space:
                 # - V span is [cap_v0..cap_v1] (height = cap_s)
                 # - U span is centered with the same width cap_s (so circles stay circles)
+                # cap_uv_zoom_out > 1 scales UVs outward so the rim reaches the circle edge (less pixelation).
                 cap_s = max(1e-6, cap_v1 - cap_v0)
                 cap_u0 = 0.5 - cap_s * 0.5
 
-                u_local = 0.5 + (yy / (2.0 * rmax))
-                v_local = 0.5 + (zz / (2.0 * rmax))
+                u_local = 0.5 + (yy / (2.0 * cap_rmax)) * cap_uv_zoom_out
+                v_local = 0.5 + (zz / (2.0 * cap_rmax)) * cap_uv_zoom_out
                 u = cap_u0 + u_local * cap_s
                 v = cap_v0 + v_local * cap_s
                 loop[uv_layer].uv = (max(0.0, min(1.0, u)), max(0.0, min(1.0, v)))
@@ -908,6 +929,8 @@ body_sector_u_offset_degrees = 135.0
 body_cap_v0 = 0.75
 body_cap_v1 = 1.0
 body_cap_rotation_degrees = 180.0
+# Scale bottom-cap UVs so the rim maps to the circle edge (>1 = zoom out, reduces pixelation of markers).
+body_cap_uv_zoom_out = 2.3
 
 write_body_paint_png = True
 
@@ -970,6 +993,7 @@ if use_body_paint_texture:
         cap_v0=body_cap_v0,
         cap_v1=body_cap_v1,
         cap_rotation_degrees=body_cap_rotation_degrees,
+        cap_uv_zoom_out=body_cap_uv_zoom_out,
     )
 
     body_img = create_body_paint_image_with_cap(
