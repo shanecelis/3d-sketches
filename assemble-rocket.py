@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from mathutils import Vector, Matrix
 
+
 # ============================================================
 # CLI ARG PARSING (Blender passes its own args; ours come after --)
 # Usage:
@@ -231,7 +232,8 @@ def make_image_texture_mat_with_alpha(
     nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
 
     mat.blend_method = "BLEND"
-    mat.shadow_method = "NONE"
+    if hasattr(mat, "shadow_method"):
+        mat.shadow_method = "NONE"  # Removed in Blender 4.3+
     return mat
 
 
@@ -489,7 +491,7 @@ def create_body_paint_image_with_cap(
         start_x = cx - (dot_count - 1) * spacing_px // 2
         for k in range(dot_count):
             x = start_x + k * spacing_px
-            draw_disc(x, cy, r_outer, (1.0, 1.0, 1.0, 1.0))
+            # draw_disc(x, cy, r_outer, (1.0, 1.0, 1.0, 1.0))
             draw_disc(x, cy, r_inner, (0.0, 0.0, 0.0, 1.0))
 
     black = (0.0, 0.0, 0.0, 1.0)
@@ -553,7 +555,7 @@ def create_body_paint_image_with_cap(
     #
     # Dots are colinear on those axes (not a horizontal row).
     cap_r = 0.5 * cap_h
-    r_start = 0.25 * cap_r
+    r_start = 0.15 * cap_r
     r_step = 0.18 * cap_r
     cap_dot_r = max(2, int(cap_r * 0.12))
 
@@ -565,7 +567,7 @@ def create_body_paint_image_with_cap(
             rr = r_start + k * r_step
             x = int(round(cx + dir_x * rr))
             y = int(round(cy + dir_y * rr))
-            draw_disc(x, y, cap_dot_r, (1.0, 1.0, 1.0, 1.0))
+            #draw_disc(x, y, cap_dot_r, (1.0, 1.0, 1.0, 1.0))
             draw_disc(x, y, max(1, int(cap_dot_r * 0.55)), (0.0, 0.0, 0.0, 1.0))
 
     # Fin_1: 1 dot on -X
@@ -1438,7 +1440,6 @@ bpy.ops.export_scene.gltf(
     use_selection=True,
     export_yup=True,
     export_apply=False,
-    export_colors=True,
     export_skins=False,
     export_animations=False,
 )
